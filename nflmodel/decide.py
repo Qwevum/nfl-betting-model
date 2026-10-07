@@ -1,0 +1,360 @@
+"""Bet / no-bet decisions with the evidence behind them.
+
+For each game this module assembles:
+  * verified facts      - things read directly from a dated source (schedule, injury
+                          report, sportsbook prices), each tagged with its source
+  * assumptions         - things the estimate relies on that are not confirmed
+  * missing information - inputs that matter but are unavailable or stale
+and for each market/side:
+  * model probability, the price's implied probability, the market's no-vig
+    probability, EV at the actual price, and how EV moves if the model is off
+  * a decision: BET, BET IF PRICE AVAILABLE (only a consensus price was seen), or
+    NO BET, with the reasons.
+
+No-bet rules (any one is enough):
+  1. EV at the available price is not above the threshold (default 2%).
+  2. The edge is fragile: EV is not positive if the true line is 0.5 point worse.
+  3. The projected starting QB is listed Out/Doubtful/Questionable, or unknown.
+  4. The model's own line differs from the market by 4+ points (unexplained).
+  5. Totals in outdoor or unknown-roof stadiums without a weather forecast.
+"""
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+
+from .model import FittedModel, novig_first
+from .odds import decimal, ev, implied_probability, kelly, no_vig
+
+MIN_EDGE = 0.02
+GAP_POINTS = 4.0
+KELLY_FRACTION = 0.25
+MAX_STAKE_UNITS = 2.0
+UNSURE = {"Out", "Doubtful", "Questionable"}
+BOOK_SOURCES_WITH_TIME = {"odds_api", "manual"}
+
+
+@dataclass
+class GameContext:
+    facts: list[str] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    block: dict[str, list[str]] = field(default_factory=lambda: {"spread": [], "ml": [], "total": []})
+    risks: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------- context
+
+def _injury_lines(inj: pd.DataFrame, team: str, week: int) -> tuple[list[str], int | None, bool]:
+    """(lines, report week, game statuses issued?) for a team's latest report up to `week`."""
+    t = inj[(inj["team"] == team) & (inj["week"] <= week)] if len(inj) else inj
+    if t is None or t.empty:
+        return [], None, False
+    wk = int(t["week"].max())
+    cur = t[t["week"] == wk]
+    issued = cur["report_status"].notna().any()
+    if issued:
+        sel = cur[cur["report_status"].isin(UNSURE)]
+        lines = [f"{r.full_name} ({r.position}) {r.report_status}"
+                 + (f" - {r.report_primary_injury}" if pd.notna(r.report_primary_injury) else "")
+                 for r in sel.itertuples(index=False)]
+    else:
+        sel = cur[cur["practice_status"].fillna("").str.startswith("Did Not")]
+        lines = [f"{r.full_name} ({r.position}) did not practice"
+                 + (f" - {r.practice_primary_injury}" if pd.notna(r.practice_primary_injury) else "")
+                 for r in sel.itertuples(index=False)]
+    return lines, wk, bool(issued)
+
+
+def _qb_status(inj: pd.DataFrame, qb_id, team: str, week: int):
+    if not isinstance(qb_id, str) or inj is None or inj.empty:
+        return None, None
+    r = inj[(inj["gsis_id"] == qb_id) & (inj["team"] == team) & (inj["week"] == week)]
+    if r.empty:
+        return None, None
+    r = r.iloc[-1]
+    return (r.report_status if pd.notna(r.report_status) else None,
+            r.practice_status if pd.notna(r.practice_status) else None)
+
+
+def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: float,
+                  overrides: dict, weather: dict) -> GameContext:
+    """g: one prediction row (namedtuple) for an upcoming game."""
+    c = GameContext()
+    sched = sources.get("schedule_scores_lines", {})
+    sched_tag = f"[nflverse schedule, retrieved {sched.get('retrieved_utc', '?')}]"
+    inj_src = sources.get("injury_reports", {})
+    inj_tag = (f"[NFL injury report via nflverse, file updated {inj_src.get('last_modified', 'unknown')}, "
+               f"retrieved {inj_src.get('retrieved_utc', '?')}]")
+
+    kick = f"{pd.Timestamp(g.gameday).strftime('%a %b %d %Y')} {g.gametime} ET"
+    c.facts.append(f"Kickoff {kick}, {g.stadium if isinstance(g.stadium, str) else 'stadium not listed'}"
+                   f"{' (neutral site)' if str(g.location) == 'Neutral' else ''} {sched_tag}")
+    roof = g.roof if isinstance(g.roof, str) else None
+    c.facts.append(f"Roof: {roof or 'not listed'}; rest days {g.away_team} {g.away_rest:g}, "
+                   f"{g.home_team} {g.home_rest:g} {sched_tag}")
+
+    week = int(g.week)
+    for side, team, qb_id, qb_name, delta, rating in (
+            ("away", g.away_team, g.away_qb_id, g.away_qb_name, g.away_qb_delta, g.away_qb_rating),
+            ("home", g.home_team, g.home_qb_id, g.home_qb_name, g.home_qb_delta, g.home_qb_rating)):
+        if team in overrides:
+            c.assumptions.append(f"{team} starter set to {overrides[team]} by qb_overrides.csv (your input)")
+        if not isinstance(qb_id, str):
+            c.missing.append(f"{team} projected starting QB not listed")
+            for m in c.block:
+                c.block[m].append(f"{team} starting QB unknown")
+            continue
+        c.facts.append(f"{team} projected starter: {qb_name} {sched_tag} (projection, not official until inactives)")
+        status, practice = _qb_status(inj, qb_id, team, week)
+        if status or practice:
+            c.facts.append(f"{qb_name} week {week} injury report: status {status or 'none'}, "
+                           f"practice: {practice or 'n/a'} {inj_tag}")
+        if status in UNSURE and team not in overrides:
+            for m in c.block:
+                c.block[m].append(f"{team} projected starter {qb_name} is {status}")
+        elif status is None and practice and practice.startswith("Did Not") and team not in overrides:
+            c.missing.append(f"{qb_name} did not practice; game status not yet issued")
+            for m in c.block:
+                c.block[m].append(f"{team} projected starter {qb_name} did not practice (status pending)")
+        if abs(delta) >= 0.02:
+            pts = delta * coefs.get("f_qb", 0.0)
+            c.assumptions.append(
+                f"{qb_name} starts for {team}; his rating differs from the QB play {team}'s team ratings "
+                f"reflect, worth {pts:+.1f} pts to {team} in the model's own line")
+        else:
+            c.assumptions.append(f"{qb_name} starts for {team} (same QB the team ratings reflect)")
+
+    for team in (g.away_team, g.home_team):
+        lines, wk, issued = _injury_lines(inj, team, week)
+        if wk is None:
+            c.missing.append(f"No injury report found for {team}")
+        else:
+            stale = "" if wk == week else f" (STALE: latest report is week {wk})"
+            if issued:
+                body = "; ".join(lines) if lines else "no players listed Out/Doubtful/Questionable"
+            else:
+                body = ("practice report only, game statuses not yet issued"
+                        + (". Did not practice: " + "; ".join(lines) if lines else ""))
+            c.facts.append(f"{team} injury report week {wk}{stale}: {body} {inj_tag}")
+            if wk != week:
+                c.missing.append(f"{team} week {week} injury report not yet in data")
+            elif not issued:
+                c.missing.append(f"{team} week {week} game statuses (Out/Doubtful/Questionable) not yet issued")
+    c.assumptions.append("Non-QB injuries are not modeled; the market line is assumed to price them "
+                         "(the fair line is mostly the market line)")
+
+    outdoor = roof not in ("dome", "closed")
+    key = (g.away_team, g.home_team)
+    if key in weather:
+        w = weather[key]
+        c.facts.append(f"Forecast wind {w['wind_mph']} mph, temp {w['temp_f']} F "
+                       f"[{w.get('source', 'weather_manual.csv')}, retrieved {w.get('retrieved_utc', '?')}]")
+    elif outdoor:
+        c.missing.append("Weather forecast (wind matters for totals) - "
+                         + ("roof status not listed" if roof is None else "outdoor stadium"))
+        c.block["total"].append("no weather forecast for an outdoor/unknown-roof game")
+
+    gap = abs(g.model_margin - g.spread_line) if pd.notna(g.spread_line) else 0.0
+    if gap >= GAP_POINTS:
+        msg = f"model's own line differs from market by {gap:.1f} pts (unexplained news?)"
+        c.block["spread"].append(msg); c.block["ml"].append(msg)
+    tgap = abs(g.model_total - g.total_line) if pd.notna(g.total_line) else 0.0
+    if tgap >= GAP_POINTS:
+        c.block["total"].append(f"model's own total differs from market by {tgap:.1f} pts")
+
+    if week <= 4:
+        c.risks.append(f"Week {week}: current-season ratings rest on few games")
+    c.assumptions.append(f"Home field worth {coefs.get('f_hfa', 0):.1f} pts in the model's own line; "
+                         f"only {k_spread:.0%} of the model's disagreement with the spread is kept "
+                         "(share that held up out of sample)")
+    return c
+
+
+# ---------------------------------------------------------------- probabilities
+
+class GamePricer:
+    """Probabilities for any line/price in one game.
+
+    The estimate starts from the market: the consensus no-vig probability at the
+    consensus line, moved by the model only as much as out-of-sample calibration
+    says the model's disagreement is worth (model.spread_cal / total_cal / ml_cal).
+    For a different line at another book (e.g. +3.5 vs +3) the key-number outcome
+    distribution supplies the difference in probability, including pushes.
+    """
+
+    def __init__(self, model: FittedModel, g, key_numbers: bool = True):
+        self.m, self.g = model, g
+        self.mdist, self.tdist = model.margin_dist, model.total_dist
+        if not key_numbers:
+            self.mdist = copy.copy(self.mdist); self.mdist.w = np.ones_like(self.mdist.w)
+            self.tdist = copy.copy(self.tdist); self.tdist.w = np.ones_like(self.tdist.w)
+        self.edge_m = (g.blend_margin - g.spread_line) if pd.notna(g.blend_margin) else 0.0
+        self.edge_t = (g.blend_total - g.total_line) if pd.notna(g.blend_total) else 0.0
+        self.has_spread_mkt = pd.notna(g.spread_line)
+        self.has_total_mkt = pd.notna(g.total_line)
+        self.has_ml_mkt = pd.notna(g.home_moneyline) and pd.notna(g.away_moneyline)
+        self.p_spread_mkt = float(novig_first(g.home_spread_odds, g.away_spread_odds)) if self.has_spread_mkt else np.nan
+        self.p_total_mkt = float(novig_first(g.over_odds, g.under_odds)) if self.has_total_mkt else np.nan
+        self.p_ml_mkt = float(novig_first(g.home_moneyline, g.away_moneyline)) if self.has_ml_mkt else np.nan
+
+    @staticmethod
+    def _cond_over(dist, mu, t):
+        over, push, under = dist.prob_over(mu, t)
+        return over / (over + under), push
+
+    def probs(self, market: str, side: str, point, shift: float = 0.0, edge_mult: float = 1.0):
+        """(p_win, p_push). shift moves the true margin/total toward the home/over side."""
+        g, m = self.g, self.m
+        if market == "ml":
+            if self.has_ml_mkt:
+                base = m.anchored(m.ml_cal, self.p_ml_mkt, self.edge_m, edge_mult)
+                p = base + (m.win_prob(g.fair_margin + shift) - m.win_prob(g.fair_margin))
+            else:
+                p = m.win_prob(g.fair_margin + shift)
+            p = float(np.clip(p, 0.001, 0.999))
+            return (p, 0.0) if side == "home" else (1 - p, 0.0)
+        if market == "spread":
+            dist, mu, ref, t = self.mdist, g.fair_margin, g.spread_line, (-point if side == "home" else point)
+            cal, p_mkt, edge, has = m.spread_cal, self.p_spread_mkt, self.edge_m, self.has_spread_mkt
+            home_or_over = side == "home"
+        else:
+            dist, mu, ref, t = self.tdist, g.fair_total, g.total_line, point
+            cal, p_mkt, edge, has = m.total_cal, self.p_total_mkt, self.edge_t, self.has_total_mkt
+            home_or_over = side == "over"
+        cond_t, push_t = self._cond_over(dist, mu + shift, t)
+        if has:
+            cond_ref, _ = self._cond_over(dist, mu, ref)
+            cond_t = m.anchored(cal, p_mkt, edge, edge_mult) + (cond_t - cond_ref)
+        cond_t = float(np.clip(cond_t, 0.001, 0.999))
+        p = cond_t if home_or_over else 1 - cond_t
+        return p * (1 - push_t), push_t
+
+
+def _against(market: str, side: str) -> float:
+    """Direction that makes the bet worse: -1 lowers margin/total, +1 raises it."""
+    return -1.0 if side in ("home", "over") else 1.0
+
+
+def price_for_edge(p_win: float, p_push: float, edge: float) -> float | None:
+    """Worst American price at which EV still equals `edge`."""
+    p_lose = 1 - p_win - p_push
+    if p_win <= 0:
+        return None
+    b = (edge + p_lose) / p_win          # needed decimal - 1
+    if b <= 0:
+        return None
+    return round(b * 100) if b >= 1 else round(-100 / b)
+
+
+def _market_prob(offers: pd.DataFrame, market: str, side: str, point) -> tuple[float, str]:
+    """No-vig market probability from a two-sided price at one book (prefer consensus)."""
+    other = {"home": "away", "away": "home", "over": "under", "under": "over"}[side]
+    for book in ["consensus"] + [b for b in offers["book"].unique() if b != "consensus"]:
+        o = offers[(offers["book"] == book) & (offers["market"] == market)]
+        mine, theirs = o[o["side"] == side], o[o["side"] == other]
+        if market == "spread":
+            mine = mine[mine["point"] == point]; theirs = theirs[theirs["point"] == -point]
+        elif market == "total":
+            mine = mine[mine["point"] == point]; theirs = theirs[theirs["point"] == point]
+        if len(mine) and len(theirs):
+            return no_vig(mine["price"].iloc[0], theirs["price"].iloc[0])[0], book
+    return np.nan, ""
+
+
+# ---------------------------------------------------------------- decisions
+
+def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
+                min_edge: float = MIN_EDGE) -> list[dict]:
+    """One record per market and side, best available price for that side."""
+    rows = []
+    pricer, plain = GamePricer(model, g), GamePricer(model, g, key_numbers=False)
+    for (market, side), o in offers.groupby(["market", "side"]):
+        o = o.dropna(subset=["price"])
+        if market != "ml":
+            o = o.dropna(subset=["point"])
+        if o.empty:
+            continue
+        scored = []
+        for r in o.itertuples(index=False):
+            pw, pp = pricer.probs(market, side, r.point)
+            scored.append((ev(pw, pp, r.price), r, pw, pp))
+        e, best, pw, pp = max(scored, key=lambda x: x[0])
+        point = best.point
+        d = _against(market, side)
+
+        def ev_at(**kw):
+            a, b = (plain if kw.pop("plain", False) else pricer).probs(market, side, point, **kw)
+            return ev(a, b, best.price)
+
+        sens = {
+            "fair 1.0 worse": ev_at(shift=d * 1.0),
+            "fair 0.5 worse": ev_at(shift=d * 0.5),
+            "fair 0.5 better": ev_at(shift=-d * 0.5),
+            "market only": ev_at(edge_mult=0.0),
+            "double model weight": ev_at(edge_mult=2.0),
+            "no key-number shape": ev_at(plain=True),
+        }
+        mkt_p, mkt_book = _market_prob(offers, market, side, point)
+        decided = 1 - pp
+        rec = {
+            "game_id": g.game_id, "market": market, "side": side,
+            "team": {"home": g.home_team, "away": g.away_team}.get(side, side.capitalize()),
+            "book": best.book, "point": point, "price": best.price,
+            "price_source": getattr(best, "source", "consensus"),
+            "odds_time": getattr(best, "odds_time", None),
+            "n_books": o["book"].nunique(),
+            "all_prices": "; ".join(sorted(
+                f"{r.book} {'' if pd.isna(r.point) else f'{r.point:+g} ' if market == 'spread' else f'{r.point:g} '}{int(r.price):+d}"
+                for r in o.itertuples(index=False))),
+            "p_win": pw, "p_push": pp, "model_prob": pw / decided if decided > 0 else np.nan,
+            "implied": implied_probability(best.price), "market_prob": mkt_p, "market_prob_book": mkt_book,
+            "ev": e, "kelly": kelly(pw, pp, best.price),
+            "min_price": price_for_edge(pw, pp, min_edge),
+            **{f"ev[{k}]": v for k, v in sens.items()},
+        }
+        reasons = []
+        if e <= min_edge:
+            reasons.append(f"EV {e:+.1%} not above {min_edge:.0%}")
+        elif sens["fair 0.5 worse"] <= 0:
+            reasons.append(f"too sensitive: EV {sens['fair 0.5 worse']:+.1%} if fair line 0.5 pt worse")
+        reasons += ctx.block.get(market, [])
+        if reasons:
+            rec["decision"] = "NO BET"
+        elif rec["price_source"] in BOOK_SOURCES_WITH_TIME:
+            rec["decision"] = "BET"
+        else:
+            rec["decision"] = "BET IF PRICE AVAILABLE"
+            reasons.append("only a consensus price was seen; confirm at your book "
+                           f"(still +{min_edge:.0%} EV at {_fmt_price(rec['min_price'])} or better at this line)")
+        rec["reasons"] = " | ".join(reasons)
+        rec["stake_units"] = (round(min(rec["kelly"] * KELLY_FRACTION * 100, MAX_STAKE_UNITS), 2)
+                              if rec["decision"] != "NO BET" else 0.0)
+
+        risks = list(ctx.risks)
+        if market == "spread" and (pp > 0.04 or abs(point) in (2.5, 3.5, 6.5, 7.5)):
+            risks.append("EV leans on how often games land exactly on 3/7 (key-number model)")
+        if abs(sens["market only"] - e) < 0.005:
+            risks.append("the edge is from price/line shopping, not from the model disagreeing with the market")
+        if sens["market only"] <= 0:
+            risks.append("using the market's probability alone the bet is not +EV")
+        if sens["no key-number shape"] <= 0:
+            risks.append("not +EV without the key-number outcome model")
+        rec["risks"] = " | ".join(risks)
+        rows.append(rec)
+    return rows
+
+
+def _fmt_price(p) -> str:
+    return "n/a" if p is None or (isinstance(p, float) and np.isnan(p)) else f"{int(p):+d}"
+
+
+def best_per_market(rows: pd.DataFrame) -> pd.DataFrame:
+    """The higher-EV side of each game/market (the side that would be bet)."""
+    if rows.empty:
+        return rows
+    return (rows.sort_values("ev", ascending=False)
+                .groupby(["game_id", "market"]).head(1).reset_index(drop=True))

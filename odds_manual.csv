@@ -1,8 +1,10 @@
 # Lines you copy from your own sportsbook apps. The model picks the best EV across all books.
 # market: spread | ml | total     side: home | away | over | under
 # point: spread from that side's view (e.g. -3.5), the total number for totals, blank for ml
+# retrieved_at: when you saw the price (e.g. 2026-10-11T11:05). Without it the price is
+#               treated as unverified and the decision stays "BET IF PRICE AVAILABLE".
 # Example rows (remove the leading # to use):
-# book,away,home,market,side,point,price
-# draftkings,KC,BUF,spread,away,+2.5,-110
-# fanduel,KC,BUF,ml,away,,+120
-book,away,home,market,side,point,price
+# book,away,home,market,side,point,price,retrieved_at
+# draftkings,PHI,JAX,spread,away,+7,-105,2026-10-11T11:05
+# fanduel,PHI,JAX,ml,away,,+280,2026-10-11T11:05
+book,away,home,market,side,point,price,retrieved_at

@@ -1,0 +1,5 @@
+# Starting QB you have confirmed (e.g. from inactives or an official team announcement)
+# when it differs from the nflverse projection or the projected starter is Questionable.
+# qb_name must match a name in the nflverse schedule (e.g. "Jalon Daniels").
+# Delete rows after the week.
+team,qb_name,source

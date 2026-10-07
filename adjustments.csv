@@ -1,4 +1,0 @@
-# Manual point adjustments for news the ratings can't see (QB out, major injuries).
-# points = how many points better (+) or worse (-) the team is this week than its ratings say.
-# Rough guide: starting QB -> backup is usually worth -3 to -7. Delete rows after the week.
-team,points,note

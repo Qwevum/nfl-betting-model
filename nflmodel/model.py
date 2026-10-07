@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from math import erf, sqrt
+from math import sqrt
 
 from .ratings import FEATURES, TOTAL_FEATURES
 
@@ -27,9 +27,19 @@ MARGINS = np.arange(-80, 81)
 TOTALS = np.arange(0, 131)
 
 
+def _erf(x: np.ndarray) -> np.ndarray:
+    """Vectorized erf (Abramowitz & Stegun 7.1.26, max abs error 1.5e-7)."""
+    s = np.sign(x)
+    x = np.abs(x)
+    t = 1 / (1 + 0.3275911 * x)
+    y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+             + 0.254829592) * t * np.exp(-x * x)
+    return s * y
+
+
 def _norm_cdf(x):
     x = np.asarray(x, dtype=float)
-    return 0.5 * (1 + np.vectorize(erf)(x / sqrt(2)))
+    return 0.5 * (1 + _erf(x / sqrt(2)))
 
 
 @dataclass
@@ -119,14 +129,15 @@ class _Core:
         return out
 
 
-def _fit_core(train: pd.DataFrame, lam: float) -> _Core:
-    tr = train.dropna(subset=FEATURES + ["result"])
+def _fit_core(train: pd.DataFrame, lam: float, features: list[str] | None = None) -> _Core:
+    features = features or FEATURES
+    tr = train.dropna(subset=features + ["result"])
     trb = tr.dropna(subset=["spread_line"])
     tt = train.dropna(subset=TOTAL_FEATURES + ["total"])
     ttb = tt.dropna(subset=["total_line"])
     return _Core(
-        Ridge(FEATURES, lam).fit(tr, tr["result"]),
-        Ridge(FEATURES + ["spread_line"], lam).fit(trb, trb["result"]),
+        Ridge(features, lam).fit(tr, tr["result"]),
+        Ridge(features + ["spread_line"], lam).fit(trb, trb["result"]),
         Ridge(TOTAL_FEATURES, lam).fit(tt, tt["total"]),
         Ridge(TOTAL_FEATURES + ["total_line"], lam).fit(ttb, ttb["total"]),
     )
@@ -140,6 +151,37 @@ def _logistic(x: np.ndarray, y: np.ndarray, iters: int = 50) -> tuple[float, flo
         H = X.T @ (X * (p * (1 - p))[:, None]) + 1e-6 * np.eye(2)
         w += np.linalg.solve(H, X.T @ (y - p))
     return float(w[0]), float(w[1])
+
+
+def _logistic_n(X: np.ndarray, y: np.ndarray, ridge: float = 1.0, iters: int = 50) -> np.ndarray:
+    """Logistic regression with intercept; light ridge on the slopes for stability."""
+    X = np.column_stack([np.ones(len(X)), X])
+    w = np.zeros(X.shape[1])
+    R = ridge * np.eye(X.shape[1]); R[0, 0] = 1e-6
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-X @ w))
+        H = X.T @ (X * (p * (1 - p))[:, None]) + R
+        w += np.linalg.solve(H, X.T @ (y - p) - R @ w)
+    return w
+
+
+def logit(p):
+    p = np.clip(np.asarray(p, float), 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p))
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-np.asarray(x, float)))
+
+
+def novig_first(a, b):
+    """No-vig probability of the first of two American prices (missing -> -110)."""
+    a = np.where(pd.isna(a), -110.0, a).astype(float)
+    b = np.where(pd.isna(b), -110.0, b).astype(float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ia = np.where(a < 0, -a / (-a + 100), 100 / (a + 100))
+        ib = np.where(b < 0, -b / (-b + 100), 100 / (b + 100))
+    return ia / (ia + ib)
 
 
 def _shrink(edge: np.ndarray, outcome_vs_line: np.ndarray) -> float:
@@ -156,10 +198,15 @@ class FittedModel:
     core: _Core
     k_spread: float     # share of the blend's disagreement with the spread that is kept
     k_total: float
-    ml_a: float         # P(home win) = logistic(ml_a + ml_b * fair_margin)
+    ml_a: float         # fallback P(home win) = logistic(ml_a + ml_b * fair_margin), no ML odds
     ml_b: float
     margin_dist: OutcomeDist
     total_dist: OutcomeDist
+    # Market-anchored calibration, fit out of sample: P = sigmoid(a + b*logit(p_market) + c*edge),
+    # edge = blend model minus the line. c ~ 0 means the model adds nothing to the market.
+    spread_cal: np.ndarray = None
+    total_cal: np.ndarray = None
+    ml_cal: np.ndarray = None
 
     @property
     def pure(self) -> Ridge:
@@ -184,8 +231,13 @@ class FittedModel:
     def win_prob(self, margin: float) -> float:
         return float(1 / (1 + np.exp(-(self.ml_a + self.ml_b * margin))))
 
+    @staticmethod
+    def anchored(cal: np.ndarray, p_market: float, edge: float, edge_mult: float = 1.0) -> float:
+        return float(sigmoid(cal[0] + cal[1] * logit(p_market) + cal[2] * edge * edge_mult))
 
-def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3) -> FittedModel:
+
+def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3,
+        features: list[str] | None = None) -> FittedModel:
     """Fit on all of `train`, calibrated on out-of-sample predictions.
 
     Calibration uses an inner walk-forward: each training season (after the first
@@ -193,11 +245,11 @@ def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3) -> FittedMo
     predictions decide how much to trust the model's disagreements with the
     market, and map predicted margins to moneyline win probabilities.
     """
-    core = _fit_core(train, lam)
+    core = _fit_core(train, lam, features)
     seasons = sorted(train["season"].unique())
     oos = []
     for s in seasons[inner_start:]:
-        inner = _fit_core(train[train["season"] < s], lam)
+        inner = _fit_core(train[train["season"] < s], lam, features)
         oos.append(inner.raw(train[train["season"] == s]))
     oos = pd.concat(oos, ignore_index=True)
 
@@ -218,5 +270,23 @@ def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3) -> FittedMo
     tfair = (t["total_line"] + k_total * (t["blend_total"] - t["total_line"])).to_numpy()
     tw = _key_weights(tfair, t["total"].to_numpy(), tsd, TOTALS, symmetric=False)
 
+    # Market-anchored probabilities (spread cover, over, home win), out of sample.
+    ms = m[m["result"] != m["spread_line"]]
+    spread_cal = _logistic_n(
+        np.column_stack([logit(novig_first(ms["home_spread_odds"], ms["away_spread_odds"])),
+                         ms["blend_margin"] - ms["spread_line"]]),
+        (ms["result"] > ms["spread_line"]).to_numpy(float))
+    tt = t[t["total"] != t["total_line"]]
+    total_cal = _logistic_n(
+        np.column_stack([logit(novig_first(tt["over_odds"], tt["under_odds"])),
+                         tt["blend_total"] - tt["total_line"]]),
+        (tt["total"] > tt["total_line"]).to_numpy(float))
+    mm = m[(m["result"] != 0) & m["home_moneyline"].notna() & m["away_moneyline"].notna()]
+    ml_cal = _logistic_n(
+        np.column_stack([logit(novig_first(mm["home_moneyline"], mm["away_moneyline"])),
+                         mm["blend_margin"] - mm["spread_line"]]),
+        (mm["result"] > 0).to_numpy(float))
+
     return FittedModel(core, k_spread, k_total, ml_a, ml_b,
-                       OutcomeDist(sd, mw, MARGINS), OutcomeDist(tsd, tw, TOTALS))
+                       OutcomeDist(sd, mw, MARGINS), OutcomeDist(tsd, tw, TOTALS),
+                       spread_cal, total_cal, ml_cal)

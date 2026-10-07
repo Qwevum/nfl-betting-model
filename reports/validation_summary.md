@@ -1,0 +1,1 @@
+Validation 2015-2026 (3082 games, out of sample): winner Brier model 0.2126 vs closing market 0.2126 (lower is better). Bets under the live rules: 1333 (646-663-24), flat ROI +2.3% (95% range -3.5% to +8.0%). Full tables: reports/validation.md

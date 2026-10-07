@@ -2,7 +2,8 @@
 
 Lines are kept in one long format, one row per offer:
     game_id, book, market ('spread'|'ml'|'total'), side ('home'|'away'|'over'|'under'),
-    point (spread from that side's view, e.g. -3.5; total number; NaN for ml), price (American)
+    point (spread from that side's view, e.g. -3.5; total number; NaN for ml), price (American),
+    source ('consensus'|'odds_api'|'manual'|'manual_untimed'), odds_time (book's update time, if known)
 
 Sources, in the order they're merged:
   1. nflverse consensus lines (always available, book = 'consensus')
@@ -18,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .data import _fetch
+from .data import SOURCES, _fetch, utcnow
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -92,11 +93,14 @@ def consensus_offers(games: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(g.total_line):
             rows.append((g.game_id, "consensus", "total", "over", g.total_line, sp(g.over_odds)))
             rows.append((g.game_id, "consensus", "total", "under", g.total_line, sp(g.under_odds)))
-    return pd.DataFrame(rows, columns=["game_id", "book", "market", "side", "point", "price"])
+    out = pd.DataFrame(rows, columns=["game_id", "book", "market", "side", "point", "price"])
+    out["source"] = "consensus"
+    out["odds_time"] = None   # nflverse does not timestamp its lines
+    return out
 
 
 def odds_api_offers(games: pd.DataFrame, key: str) -> pd.DataFrame:
-    events = json.loads(_fetch(ODDS_API_URL.format(key=key)))
+    events = json.loads(_fetch(ODDS_API_URL.format(key=key), "odds_api"))
     idx = {(g.home_team, g.away_team): g.game_id for g in games.itertuples(index=False)}
     rows = []
     for ev_ in events:
@@ -112,21 +116,29 @@ def odds_api_offers(games: pd.DataFrame, key: str) -> pd.DataFrame:
                         side = oc["name"].lower()
                     else:
                         side = "home" if FULL_NAMES.get(oc["name"]) == home else "away"
-                    rows.append((gid, bk["key"], market, side, oc.get("point", np.nan), oc["price"]))
-    return pd.DataFrame(rows, columns=["game_id", "book", "market", "side", "point", "price"])
+                    rows.append((gid, bk["key"], market, side, oc.get("point", np.nan), oc["price"],
+                                 "odds_api", mk.get("last_update") or bk.get("last_update")))
+    return pd.DataFrame(rows, columns=["game_id", "book", "market", "side", "point", "price",
+                                       "source", "odds_time"])
 
 
 def manual_offers(games: pd.DataFrame, path: Path) -> pd.DataFrame:
-    """odds_manual.csv columns: book,away,home,market,side,point,price."""
+    """odds_manual.csv columns: book,away,home,market,side,point,price[,retrieved_at]."""
     m = pd.read_csv(path, comment="#")
+    cols = ["game_id", "book", "market", "side", "point", "price", "source", "odds_time"]
     if m.empty:
-        return pd.DataFrame(columns=["game_id", "book", "market", "side", "point", "price"])
+        return pd.DataFrame(columns=cols)
+    if "retrieved_at" not in m.columns:
+        m["retrieved_at"] = None
+    m["odds_time"] = m["retrieved_at"]
+    m["source"] = np.where(m["retrieved_at"].notna(), "manual", "manual_untimed")
+    SOURCES["manual_odds"] = {"url": str(path), "retrieved_utc": utcnow(), "rows": int(len(m))}
     idx = {(g.home_team, g.away_team): g.game_id for g in games.itertuples(index=False)}
     m["game_id"] = [idx.get((h, a)) for h, a in zip(m["home"], m["away"])]
     missing = m[m["game_id"].isna()]
     if len(missing):
         print(f"  ! {len(missing)} manual odds rows don't match a game this week (check team codes)")
-    return m.dropna(subset=["game_id"])[["game_id", "book", "market", "side", "point", "price"]]
+    return m.dropna(subset=["game_id"])[cols]
 
 
 def gather_offers(week_games: pd.DataFrame) -> pd.DataFrame:
@@ -139,6 +151,7 @@ def gather_offers(week_games: pd.DataFrame) -> pd.DataFrame:
             frames.append(api)
         except Exception as exc:
             print(f"  ! The Odds API failed: {exc}")
+            SOURCES["odds_api"] = {"url": "api.the-odds-api.com", "retrieved_utc": utcnow(), "error": str(exc)}
     manual = ROOT / "odds_manual.csv"
     if manual.exists():
         frames.append(manual_offers(week_games, manual))

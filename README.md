@@ -1,129 +1,140 @@
-# NFL spread / moneyline / total model
+# NFL betting model
 
-Power-ratings model that prices every NFL game, compares its numbers with the
-sportsbooks, and flags bets where the expected value clears a threshold. Built
-on free [nflverse](https://github.com/nflverse) data (scores, closing lines and
-play-by-play EPA since 2010).
+Prices NFL spreads, moneylines and totals, compares them with sportsbook prices,
+and returns **BET / NO BET with the evidence**: verified facts with their sources
+and timestamps, assumptions, missing information, EV at the actual price, and
+how EV changes if the model is wrong. Every prediction, including passes, is
+logged before kickoff and graded afterwards.
 
 ## Setup
 
 ```bash
-cd nfl-model
-pip install -r requirements.txt
+pip install -r requirements.txt       # Python 3.10+
+python -m unittest discover tests     # betting-math checks
 ```
 
-## Weekly use
+## Weekly workflow
 
 ```bash
-python run.py predict            # next week's games: lines, fair numbers, bets
-python run.py predict --week 6   # a specific week
-python run.py ratings            # current team power ratings
-python run.py grade              # after the games: record, units, closing-line value
-python run.py backtest           # walk-forward test against closing lines, 2015-now
-python run.py recommend          # +EV bets for the next game day (table below)
+python run.py predict                 # report for the upcoming week + log every prediction
+python run.py recommend               # compact table for the next game day
+python run.py grade                   # after games: probability quality, bets, passes, CLV
+python run.py validate                # out-of-sample validation (about 2 minutes)
 ```
 
-### `recommend`: model probability vs implied probability
+`predict` writes `reports/<season>_week<NN>.md`, with one section per game:
 
-```bash
-python run.py recommend                          # next game day, live odds
-python run.py recommend --date 2026-10-11        # a specific day
-python run.py recommend --date 2026-10-08 --days 5   # Thu-Mon of a week
-python run.py recommend --date 2026-09-27        # past day: closing lines + results
-python run.py recommend --min-edge 0.03 --markets spread,ml --all
-```
+* **Verified facts**: kickoff, stadium, roof, rest, projected starting QBs, the
+  official injury report (or that game statuses are not issued yet), each tagged
+  with its source and retrieval time.
+* **Model estimate**: market line, the model's own line, the calibrated fair
+  line, win probability, and the inputs that moved the model's line most.
+* **Per market and side**: best price found, implied probability, the market's
+  no-vig probability, the model's probability, EV, EV if the line is 0.5 pt worse,
+  EV using the market alone, and the decision.
+* **Decisions** with reasons, minimum acceptable price, sensitivity, and why the
+  bet could be wrong.
+* **Assumptions** and **missing or stale information**, listed separately.
 
-For every side of every game it takes the best available price and shows:
+## Your inputs (all optional)
 
-| column | meaning |
+| file | use |
 |---|---|
-| Implied | break-even win % of the price (`implied_probability`: -110 → 52.4%, +150 → 40.0%) |
-| Model | the model's win % for that bet, excluding pushes |
-| Edge | expected profit per $1: `p_win × (decimal odds − 1) − p_lose` |
-| Kelly | full-Kelly bankroll share `(b·p − q) / b`; Stake is quarter Kelly, max 2u |
-| Flag | `+EV` when Edge > `--min-edge` (default 2%); `CHECK NEWS` when the model's own line is 4+ pts off the market |
+| `odds_manual.csv` | prices from your sportsbook apps, with `retrieved_at`; required to get a plain **BET** |
+| `qb_overrides.csv` | a starting QB you have confirmed (inactives, team announcement) |
+| `weather_manual.csv` | wind/temperature forecast; the model won't bet an outdoor total without it |
+| `ODDS_API_KEY` env var | pulls every US book from the-odds-api.com (free tier) with per-book update times |
 
-Upcoming dates use live odds (nflverse consensus, The Odds API if `ODDS_API_KEY`
-is set, and `odds_manual.csv`). Past dates use the closing lines, fit the model
-only on games before that date, and grade each bet. Each run saves a CSV to
-`picks/recommend_<date>.csv`.
+## Data sources
 
-`predict` prints a sheet like this, and saves it under `picks/`:
+All from the [nflverse](https://github.com/nflverse) project. Each run records
+URL, retrieval time and server Last-Modified in `data/sources.json` and in the report.
 
-| column | meaning |
-|---|---|
-| market | consensus sportsbook spread |
-| model | our own line from team ratings alone |
-| fair | ratings blended with the market (what edges are measured from) |
-| home_win% / mkt_home% | our win probability vs the market's no-vig probability |
-| SPREAD / ML / TOTAL | recommended bet, best price found, EV, stake in units (1u = 1% of bankroll) |
+| data | used for | limits |
+|---|---|---|
+| schedule/results (`games.csv`) | scores, consensus closing lines, rest, roof, projected starting QBs | lines have no per-book timestamp; projected QBs are not official |
+| play-by-play | EPA, success rate, QB EPA per dropback | updated nightly |
+| injury reports | game status and practice participation | game statuses usually appear Friday (Wednesday for Thursday games) |
 
-Rows marked ⚠ **check news** are not bets: the model disagrees with the market by
-4+ points, which nearly always means an injury or QB change the ratings can't see.
+Not available here, so reported as missing instead of guessed: weather forecasts,
+travel distance, confirmed inactives, and timestamped book prices unless you supply them.
 
-## Getting the best line (line shopping)
+## How the probability is calculated
 
-By default the model only sees the nflverse consensus line. To compare every book:
+1. **Ratings** (`nflmodel/ratings.py`). Games are replayed in date order. Each
+   team has opponent-adjusted ratings for points margin, EPA/play, success rate
+   and pass EPA (offense and defense), plus pace and points. Only games before
+   kickoff are used, and 60% of each rating carries into the next season.
+2. **QB change**. Each QB has an opponent-adjusted EPA/dropback rating, shrunk
+   toward the measured level of inexperienced QBs. A team's pass ratings already
+   reflect its usual QB, so the feature is only *starter rating minus the QB play
+   the team ratings reflect*. A team with its usual starter gets about 0, so the
+   QB is not counted twice.
+3. **Model line** (`nflmodel/model.py`). Ridge regression on those features gives
+   the model's own margin and total. A second regression adds the market line.
+4. **Market-anchored probability**. The estimate starts from the consensus
+   no-vig probability. A calibration fit only on past seasons' out-of-sample
+   predictions, `sigmoid(a + b·logit(market) + c·(model − line))`, decides how far
+   the model may move it. Currently `c` is about 0 for spreads, so the model adds
+   nothing there; it is small and positive for totals and moneylines.
+5. **Other lines and prices**. A key-number outcome distribution (3, 7, 10, ...
+   happen more than a bell curve says) converts the probability to other lines,
+   including push chances. This is what makes +7.5 vs +7 worth paying for.
+6. **EV** = `p_win × (decimal − 1) − p_lose` at the actual price; pushes return the stake.
 
-* **Automatic:** get a free key at [the-odds-api.com](https://the-odds-api.com)
-  (500 requests/month; one `predict` run uses 1), then
-  `export ODDS_API_KEY=yourkey` before running `predict`.
-* **Manual:** type lines from your own apps into `odds_manual.csv`.
+## Bet / no-bet rules (`nflmodel/decide.py`)
 
-For each side the model scores every book's line and price and keeps the one with
-the highest expected value, so +3.5 at -115 vs +3 at -105 is decided correctly,
-including the chance of a push on 3.
+**NO BET** if any of these hold:
+* EV ≤ 2% (`--min-edge`)
+* EV ≤ 0 if the true line is 0.5 pt worse (too sensitive)
+* the projected starting QB is Out, Doubtful or Questionable, did not practice
+  with no status issued yet, or is unknown
+* the model's own line is 4+ pts from the market (unexplained)
+* the bet is a total for an outdoor or unknown-roof game with no forecast
 
-## News adjustments
+**BET IF PRICE AVAILABLE** means it passes, but only a consensus price was
+seen; the report gives the worst price that is still +EV.
 
-Put injury/QB adjustments in `adjustments.csv`, e.g. `CIN,-6,backup QB`. The
-model's own line moves the full amount; the fair line only moves the share the
-market isn't already pricing.
+**BET** means it passes on a timestamped price from a book.
 
-## How it works
+Stakes are a quarter of Kelly, capped at 2 units (1u = 1% of bankroll).
 
-1. **Ratings** (`nflmodel/ratings.py`): games are replayed in date order. Each team
-   carries opponent-adjusted ratings for points margin, EPA/play, success rate and
-   pass EPA on offense and defense, plus pace and points. Features for a game only
-   use games before it. 60% of each rating carries over to the next season.
-2. **Model** (`nflmodel/model.py`): ridge regressions fit on all past seasons
-   predict the home margin and the total. The *blend* model also sees the market
-   line. An inner walk-forward then measures, on predictions the model never
-   trained on, how much of its disagreement with the line was real, and shrinks
-   the fair line toward the market by that much. Moneyline win probabilities come
-   from a logistic fit on those same out-of-sample predictions.
-3. **Probabilities**: margins are not bell-shaped (3, 7, 10, 6, 14 happen far more
-   often), so the outcome distribution is re-weighted by how often each final
-   margin and total has actually happened. That gets pushes and key numbers right.
-4. **Bets** (`nflmodel/evaluate.py`): win/push/lose probabilities for every offer
-   give an expected value. Minimum EV: 2% spreads/totals, 3% moneylines. Stakes are
-   quarter-Kelly, capped at 2 units.
+## Validation (`python run.py validate`, full tables in `reports/validation.md`)
 
-## Backtest (walk-forward, 2015 – week 4 of 2026, against closing lines)
+Walk-forward: each season is predicted by a model fit and calibrated only on
+earlier seasons. Latest run, 2015 to week 4 of 2026, 3,082 games:
 
-Each season is predicted by a model fit and calibrated only on earlier seasons.
+| target | model | closing market (no-vig) | baseline |
+|---|---|---|---|
+| winner (Brier) | 0.2126 | 0.2126 | ratings only 0.2189, home rate 0.2479 |
+| home covers (Brier) | 0.2502 | 0.2500 | coin flip 0.2500 |
+| over hits (Brier) | 0.2502 | 0.2500 | coin flip 0.2500 |
 
-| market | bets at EV ≥ 2% | record | win % (95% range) | ROI |
-|---|---|---|---|---|
-| spread | 671 | 347-312-12 | 52.7% (48.8–56.5%) | +4.9% |
-| moneyline | 724 | 326-396-2 | 45.2% (mostly underdogs) | +1.5% |
-| total | 509 | 245-255-9 | 49.0% | −1.9% |
+Bets under the live rules against closing consensus prices: 1,333 bets,
+646-663-24, flat-stake ROI **+2.3% (95% range −3.5% to +8.0%)**: spreads +3.4%,
+moneylines +10.7% (on only 219 bets, range −7.5% to +28.8%), totals −3.5%.
+Quarter-Kelly staking returned +1.4% on the amount staked.
 
-How to read this: the model's probabilities are well calibrated (predicted and
-actual win rates match), but against **closing** lines it does not find a
-reliable edge; every range above includes break-even. Out of sample, only
-~10–20% of the model's disagreement with the spread turned out to be real, and
-`fit` automatically shrinks its edges to that share. Expect most of any
-real-world edge to come from line shopping and betting before the line moves,
-which is exactly what `grade` measures with closing-line value.
+**What this means:** the model is about as accurate as the closing line, not
+better. No result above is statistically significant. The realistic edge is
+**line shopping**: betting a number better than the market consensus. That is
+why consensus prices alone almost never produce a bet. The QB feature lowered
+the model's own-line error in 9 of 12 seasons, and its contribution to final
+probabilities is small.
 
-## Reading the results honestly
+**Information timing:** historical predictions use closing lines (available
+before kickoff) and actual starting QBs (normally known about 90 minutes before
+kickoff). Historical weather is the observed value, not a forecast. Model design
+choices were made after seeing 2015–2025 results, so the only pristine holdout is
+the prediction log from now on.
 
-* Break-even at -110 is **52.4%**. Over a season (~50-100 bets) the 95% range
-  around any win rate is roughly ±10%, so a single season proves very little.
-* The backtest bets **closing** lines, the sharpest numbers there are. Betting
-  earlier in the week and shopping books is where real-world edge usually comes from.
-* Track **closing-line value** with `grade`: consistently getting better numbers
-  than the close is the earliest reliable sign the model is finding something.
+## Prediction log
+
+`logs/predictions.csv` is append-only: every side of every market, every run,
+with time, model version (git hash), odds and source, probabilities, EV and
+decision. `grade` scores the last prediction before kickoff for each side. It
+reports Brier/log loss for all of them against the market, bet results at the
+logged stake and flat 1u, CLV, and how the passes would have done.
+`logs/archive/` holds development runs from an unreleased model version.
 
 Bet only what you can afford to lose.
