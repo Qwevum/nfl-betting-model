@@ -22,7 +22,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "data"
 
-GAMES_URL = "https://github.com/nflverse/nfldata/raw/master/data/games.csv"
+GAMES_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv"
 PBP_URL = (
     "https://github.com/nflverse/nflverse-data/releases/download/pbp/"
     "play_by_play_{season}.parquet"

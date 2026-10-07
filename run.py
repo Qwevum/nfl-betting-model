@@ -39,7 +39,7 @@ def build(refresh: bool = True):
     return games, feat, table, current
 
 
-def apply_adjustments(preds: pd.DataFrame, market_weight: float) -> pd.DataFrame:
+def apply_adjustments(preds: pd.DataFrame, market_weight: float, k_spread: float) -> pd.DataFrame:
     """adjustments.csv: team,points,note  (points = how much better (+) or worse (-)
     the team is this week than its ratings say, e.g. KC,-6,backup QB starting)."""
     path = ROOT / "adjustments.csv"
@@ -54,8 +54,8 @@ def apply_adjustments(preds: pd.DataFrame, market_weight: float) -> pd.DataFrame
     preds = preds.copy()
     preds["model_margin"] += h - a
     # The market has usually priced the news already; only the ratings part of the
-    # blend is missing it.
-    preds["fair_margin"] += (h - a) * (1 - market_weight)
+    # blend is missing it, and only the calibrated share of that counts.
+    preds["fair_margin"] += (h - a) * (1 - market_weight) * k_spread
     for t, p in pts.items():
         print(f"  adjustment: {t} {p:+.1f} pts")
     return preds
@@ -95,15 +95,14 @@ def cmd_predict(args):
     if wk.empty:
         raise SystemExit(f"No games found for {season} week {week}")
     preds = model.predict(wk)
-    preds = apply_adjustments(preds, coefs["spread_line"])
+    preds = apply_adjustments(preds, coefs["spread_line"], model.k_spread)
 
     print("Gathering odds ...")
     offers = gather_offers(wk)
     best = evaluate.evaluate_offers(model, preds, offers)
     picks = evaluate.pick_bets(best, preds)
     preds["mkt_home_win"] = evaluate.market_no_vig(preds)
-    preds["model_home_win"] = [model.margin_dist.prob_over(m, 0)[0] + 0.5 * model.margin_dist.prob_over(m, 0)[1]
-                               for m in preds["fair_margin"]]
+    preds["model_home_win"] = [model.win_prob(m) for m in preds["fair_margin"]]
 
     idx = preds.set_index("game_id")
     picks["pick"] = [describe_pick(r, idx) for r in picks.itertuples(index=False)]
@@ -131,8 +130,8 @@ def cmd_predict(args):
         rows.append(row)
     sheet = pd.DataFrame(rows)
 
-    print(f"\n=== {season} Week {week} ===   (market weight in blend: {coefs['spread_line']:.2f}, "
-          f"home field: {coefs['f_hfa']:.2f} pts, margin sd: {model.margin_dist.sd:.1f})\n")
+    print(f"\n=== {season} Week {week} ===   (edge kept after calibration: spreads "
+          f"{model.k_spread:.0%}, totals {model.k_total:.0%}; margin sd {model.margin_dist.sd:.1f})\n")
     print(sheet.to_string(index=False))
     bets = picks[picks["status"] == "BET"].sort_values("ev", ascending=False)
     print(f"\nBETS ({len(bets)}):")

@@ -26,9 +26,9 @@ def outcome_probs(model: FittedModel, row, market: str, side: str, point: float)
             _, p, w = model.margin_dist.prob_over(mu, point)
         return w, p
     if market == "ml":
-        mu = row.fair_margin
-        over, tie, under = model.margin_dist.prob_over(mu, 0)
-        return (over, tie) if side == "home" else (under, tie)
+        # Calibrated on past seasons; ties (~0.3% of games) are ignored.
+        p_home = model.win_prob(row.fair_margin)
+        return (p_home, 0.0) if side == "home" else (1 - p_home, 0.0)
     mu = row.fair_total
     over, push, under = model.total_dist.prob_over(mu, point)
     return (over, push) if side == "over" else (under, push)

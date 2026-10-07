@@ -97,47 +97,126 @@ class OutcomeDist:
 
 
 @dataclass
-class FittedModel:
+class _Core:
     pure: Ridge
     blend: Ridge
     total_pure: Ridge
     total_blend: Ridge
-    margin_dist: OutcomeDist
-    total_dist: OutcomeDist
 
-    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+    def raw(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Uncalibrated predictions: pure model, and blend wherever a line exists."""
         out = df.copy()
         out["model_margin"] = self.pure.predict(out)
         out["model_total"] = self.total_pure.predict(out)
-        has_line = out["spread_line"].notna()
-        out["fair_margin"] = out["model_margin"]
-        if has_line.any():
-            out.loc[has_line, "fair_margin"] = self.blend.predict(out[has_line])
-        has_tot = out["total_line"].notna()
-        out["fair_total"] = out["model_total"]
-        if has_tot.any():
-            out.loc[has_tot, "fair_total"] = self.total_blend.predict(out[has_tot])
+        out["blend_margin"] = np.nan
+        out["blend_total"] = np.nan
+        has = out["spread_line"].notna()
+        if has.any():
+            out.loc[has, "blend_margin"] = self.blend.predict(out[has])
+        has = out["total_line"].notna()
+        if has.any():
+            out.loc[has, "blend_total"] = self.total_blend.predict(out[has])
         return out
 
 
-def fit(train: pd.DataFrame, lam: float = 5.0) -> FittedModel:
+def _fit_core(train: pd.DataFrame, lam: float) -> _Core:
     tr = train.dropna(subset=FEATURES + ["result"])
-    pure = Ridge(FEATURES, lam).fit(tr, tr["result"])
     trb = tr.dropna(subset=["spread_line"])
-    blend = Ridge(FEATURES + ["spread_line"], lam).fit(trb, trb["result"])
-
     tt = train.dropna(subset=TOTAL_FEATURES + ["total"])
-    total_pure = Ridge(TOTAL_FEATURES, lam).fit(tt, tt["total"])
     ttb = tt.dropna(subset=["total_line"])
-    total_blend = Ridge(TOTAL_FEATURES + ["total_line"], lam).fit(ttb, ttb["total"])
+    return _Core(
+        Ridge(FEATURES, lam).fit(tr, tr["result"]),
+        Ridge(FEATURES + ["spread_line"], lam).fit(trb, trb["result"]),
+        Ridge(TOTAL_FEATURES, lam).fit(tt, tt["total"]),
+        Ridge(TOTAL_FEATURES + ["total_line"], lam).fit(ttb, ttb["total"]),
+    )
 
-    mu = blend.predict(trb)
-    sd = float(np.std(trb["result"].to_numpy() - mu))
-    mw = _key_weights(mu, trb["result"].to_numpy(), sd, MARGINS, symmetric=True)
 
-    tmu = total_blend.predict(ttb)
-    tsd = float(np.std(ttb["total"].to_numpy() - tmu))
-    tw = _key_weights(tmu, ttb["total"].to_numpy(), tsd, TOTALS, symmetric=False)
+def _logistic(x: np.ndarray, y: np.ndarray, iters: int = 50) -> tuple[float, float]:
+    X = np.column_stack([np.ones_like(x), x])
+    w = np.zeros(2)
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-X @ w))
+        H = X.T @ (X * (p * (1 - p))[:, None]) + 1e-6 * np.eye(2)
+        w += np.linalg.solve(H, X.T @ (y - p))
+    return float(w[0]), float(w[1])
 
-    return FittedModel(pure, blend, total_pure, total_blend,
+
+def _shrink(edge: np.ndarray, outcome_vs_line: np.ndarray) -> float:
+    """Slope of (actual - line) on (model - line), forced into [0, 1].
+    1 = the model's disagreements with the line are fully real; 0 = pure noise."""
+    if len(edge) < 200 or np.var(edge) == 0:
+        return 0.0
+    e = edge - edge.mean()
+    return float(np.clip(np.sum(e * (outcome_vs_line - outcome_vs_line.mean())) / np.sum(e * e), 0, 1))
+
+
+@dataclass
+class FittedModel:
+    core: _Core
+    k_spread: float     # share of the blend's disagreement with the spread that is kept
+    k_total: float
+    ml_a: float         # P(home win) = logistic(ml_a + ml_b * fair_margin)
+    ml_b: float
+    margin_dist: OutcomeDist
+    total_dist: OutcomeDist
+
+    @property
+    def pure(self) -> Ridge:
+        return self.core.pure
+
+    @property
+    def blend(self) -> Ridge:
+        return self.core.blend
+
+    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = self.core.raw(df)
+        out["fair_margin"] = np.where(
+            out["spread_line"].notna(),
+            out["spread_line"] + self.k_spread * (out["blend_margin"] - out["spread_line"]),
+            out["model_margin"])
+        out["fair_total"] = np.where(
+            out["total_line"].notna(),
+            out["total_line"] + self.k_total * (out["blend_total"] - out["total_line"]),
+            out["model_total"])
+        return out
+
+    def win_prob(self, margin: float) -> float:
+        return float(1 / (1 + np.exp(-(self.ml_a + self.ml_b * margin))))
+
+
+def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3) -> FittedModel:
+    """Fit on all of `train`, calibrated on out-of-sample predictions.
+
+    Calibration uses an inner walk-forward: each training season (after the first
+    few) is predicted by a model fit only on the seasons before it. Those honest
+    predictions decide how much to trust the model's disagreements with the
+    market, and map predicted margins to moneyline win probabilities.
+    """
+    core = _fit_core(train, lam)
+    seasons = sorted(train["season"].unique())
+    oos = []
+    for s in seasons[inner_start:]:
+        inner = _fit_core(train[train["season"] < s], lam)
+        oos.append(inner.raw(train[train["season"] == s]))
+    oos = pd.concat(oos, ignore_index=True)
+
+    m = oos.dropna(subset=["blend_margin", "result"])
+    k_spread = _shrink((m["blend_margin"] - m["spread_line"]).to_numpy(),
+                       (m["result"] - m["spread_line"]).to_numpy())
+    t = oos.dropna(subset=["blend_total", "total"])
+    k_total = _shrink((t["blend_total"] - t["total_line"]).to_numpy(),
+                      (t["total"] - t["total_line"]).to_numpy())
+
+    fair = (m["spread_line"] + k_spread * (m["blend_margin"] - m["spread_line"])).to_numpy()
+    decided = m["result"].to_numpy() != 0
+    ml_a, ml_b = _logistic(fair[decided], (m["result"].to_numpy()[decided] > 0).astype(float))
+
+    tsd = float(np.std(t["total"] - (t["total_line"] + k_total * (t["blend_total"] - t["total_line"]))))
+    sd = float(np.std(m["result"].to_numpy() - fair))
+    mw = _key_weights(fair, m["result"].to_numpy(), sd, MARGINS, symmetric=True)
+    tfair = (t["total_line"] + k_total * (t["blend_total"] - t["total_line"])).to_numpy()
+    tw = _key_weights(tfair, t["total"].to_numpy(), tsd, TOTALS, symmetric=False)
+
+    return FittedModel(core, k_spread, k_total, ml_a, ml_b,
                        OutcomeDist(sd, mw, MARGINS), OutcomeDist(tsd, tw, TOTALS))

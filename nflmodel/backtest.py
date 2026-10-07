@@ -47,7 +47,7 @@ def run(feat: pd.DataFrame, test_seasons: list[int],
             "mae_market": np.nanmean(np.abs(test["result"] - test["spread_line"])),
             "mae_model": np.nanmean(np.abs(test["result"] - test["model_margin"])),
             "mae_blend": np.nanmean(np.abs(test["result"] - test["fair_margin"])),
-            "market_weight": model.blend.raw_coefs()["spread_line"],
+            "k_spread": model.k_spread, "k_total": model.k_total,
         })
         best = evaluate.evaluate_offers(model, test, consensus_offers(test))
         picks = evaluate.pick_bets(best, test)

@@ -62,13 +62,34 @@ market isn't already pricing.
    use games before it. 60% of each rating carries over to the next season.
 2. **Model** (`nflmodel/model.py`): ridge regressions fit on all past seasons
    predict the home margin and the total. The *blend* model also sees the market
-   line; its weight on the market shows how much the ratings add.
+   line. An inner walk-forward then measures, on predictions the model never
+   trained on, how much of its disagreement with the line was real, and shrinks
+   the fair line toward the market by that much. Moneyline win probabilities come
+   from a logistic fit on those same out-of-sample predictions.
 3. **Probabilities**: margins are not bell-shaped (3, 7, 10, 6, 14 happen far more
    often), so the outcome distribution is re-weighted by how often each final
    margin and total has actually happened. That gets pushes and key numbers right.
 4. **Bets** (`nflmodel/evaluate.py`): win/push/lose probabilities for every offer
    give an expected value. Minimum EV: 2% spreads/totals, 3% moneylines. Stakes are
    quarter-Kelly, capped at 2 units.
+
+## Backtest (walk-forward, 2015 – week 4 of 2026, against closing lines)
+
+Each season is predicted by a model fit and calibrated only on earlier seasons.
+
+| market | bets at EV ≥ 2% | record | win % (95% range) | ROI |
+|---|---|---|---|---|
+| spread | 671 | 347-312-12 | 52.7% (48.8–56.5%) | +4.9% |
+| moneyline | 724 | 326-396-2 | 45.2% (mostly underdogs) | +1.5% |
+| total | 509 | 245-255-9 | 49.0% | −1.9% |
+
+How to read this: the model's probabilities are well calibrated (predicted and
+actual win rates match), but against **closing** lines it does not find a
+reliable edge; every range above includes break-even. Out of sample, only
+~10–20% of the model's disagreement with the spread turned out to be real, and
+`fit` automatically shrinks its edges to that share. Expect most of any
+real-world edge to come from line shopping and betting before the line moves,
+which is exactly what `grade` measures with closing-line value.
 
 ## Reading the results honestly
 
