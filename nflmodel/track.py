@@ -12,14 +12,14 @@ import numpy as np
 import pandas as pd
 
 from .backtest import grade, profit
-from .odds import no_vig, implied
+from .odds import implied_probability, no_vig
 
 ROOT = Path(__file__).resolve().parent.parent
 PICKS = ROOT / "picks"
 
 
 def grade_all(games: pd.DataFrame) -> pd.DataFrame | None:
-    files = sorted(PICKS.glob("*.csv"))
+    files = sorted(PICKS.glob("*_week[0-9][0-9].csv"))
     if not files:
         print("No logged picks yet. Run `predict` first; it writes picks/<season>_week<N>.csv.")
         return None
@@ -46,7 +46,7 @@ def grade_all(games: pd.DataFrame) -> pd.DataFrame | None:
         if r.market == "ml" and pd.notna(r.home_moneyline) and pd.notna(r.away_moneyline):
             h, a = no_vig(r.home_moneyline, r.away_moneyline)
             close_p = h if r.side == "home" else a
-            return close_p - implied(r.price)  # win-prob points better than the fair close
+            return close_p - implied_probability(r.price)  # win-prob points better than the fair close
         return np.nan
 
     df["clv"] = df.apply(clv, axis=1)

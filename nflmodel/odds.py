@@ -46,22 +46,32 @@ def decimal(american: float) -> float:
     return 1 + american / 100 if american > 0 else 1 + 100 / abs(american)
 
 
-def implied(american: float) -> float:
-    return 1 / decimal(american)
+def implied_probability(american: float) -> float:
+    """Break-even win probability of an American price, vig included.
+
+    -110 -> 110/210 = 52.4%      +150 -> 100/250 = 40.0%
+    """
+    if american == 0 or abs(american) < 100:
+        raise ValueError(f"not a valid American price: {american}")
+    if american < 0:
+        return -american / (-american + 100)
+    return 100 / (american + 100)
 
 
 def no_vig(p1_american: float, p2_american: float) -> tuple[float, float]:
-    a, b = implied(p1_american), implied(p2_american)
+    """Both sides' implied probabilities with the bookmaker's margin removed."""
+    a, b = implied_probability(p1_american), implied_probability(p2_american)
     return a / (a + b), b / (a + b)
 
 
 def ev(p_win: float, p_push: float, american: float) -> float:
-    """Expected profit per 1 unit staked."""
+    """Expected profit per 1 unit staked: the bet's edge. A push returns the stake."""
     p_lose = 1 - p_win - p_push
     return p_win * (decimal(american) - 1) - p_lose
 
 
 def kelly(p_win: float, p_push: float, american: float) -> float:
+    """Full-Kelly bankroll fraction, f* = (b*p - q) / b, never below 0."""
     b = decimal(american) - 1
     p_lose = 1 - p_win - p_push
     return max(0.0, (b * p_win - p_lose) / b)

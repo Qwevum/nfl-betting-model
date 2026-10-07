@@ -5,6 +5,7 @@
   python run.py backtest [--from 2015]               walk-forward test vs closing lines
   python run.py ratings                              current team power ratings
   python run.py grade                                grade logged picks + CLV
+  python run.py recommend [--date YYYY-MM-DD]        +EV bets for a game day (live or historical)
 """
 from __future__ import annotations
 
@@ -15,10 +16,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from nflmodel import backtest, evaluate, track
+from nflmodel import backtest, evaluate, recommend, track
 from nflmodel.data import FIRST_PBP_SEASON, load_games, load_team_games
 from nflmodel.model import fit
-from nflmodel.odds import gather_offers
+from nflmodel.odds import consensus_offers, gather_offers
 from nflmodel.ratings import build_features
 
 ROOT = Path(__file__).resolve().parent
@@ -178,6 +179,71 @@ def cmd_ratings(args):
     print(table.round(3).to_string(index=False))
 
 
+def cmd_recommend(args):
+    """+EV recommendations for one game day (or a range of days).
+
+    Upcoming dates use live odds: nflverse consensus, The Odds API (if
+    ODDS_API_KEY is set) and odds_manual.csv. Past dates use the historical
+    closing lines, with the model fit only on games before that date, and
+    grade each bet.
+    """
+    games, feat, _, _ = build(refresh=not args.no_refresh)
+    today = pd.Timestamp.today().normalize()
+    start = pd.Timestamp(args.date) if args.date else today
+    if not args.date:
+        ahead = feat.loc[(feat["gameday"] >= start) & feat["result"].isna(), "gameday"]
+        if ahead.empty:
+            raise SystemExit("No upcoming games in the schedule.")
+        start = ahead.min()
+    end = start + pd.Timedelta(days=args.days)
+    day = feat[(feat["gameday"] >= start) & (feat["gameday"] < end)]
+    if day.empty:
+        raise SystemExit(f"No games between {start.date()} and {(end - pd.Timedelta(days=1)).date()}.")
+
+    train = feat[feat["result"].notna() & (feat["gameday"] < start)
+                 & (feat["season"] > FIRST_PBP_SEASON)]
+    model = fit(train)
+    preds = model.predict(day)
+
+    live = start >= today
+    if live:
+        preds = apply_adjustments(preds, model.blend.raw_coefs()["spread_line"], model.k_spread)
+        print("Gathering live odds ...")
+        offers = gather_offers(day)
+    else:
+        offers = consensus_offers(day)
+    markets = set(args.markets.split(","))
+    offers = offers[offers["market"].isin(markets)]
+
+    rec = recommend.compare_offers(model, preds, offers, min_edge=args.min_edge)
+    if rec.empty:
+        raise SystemExit("No odds available for these games yet.")
+    if not live:
+        rec = recommend.add_results(rec)
+
+    span = start.strftime("%a %b %d, %Y") + (
+        "" if args.days == 1 else f" - {(end - pd.Timedelta(days=1)).strftime('%a %b %d')}")
+    source = "live odds" if live else "historical closing lines"
+    print(f"\n{span}  |  {len(day)} games  |  {source}  |  flag: edge > {args.min_edge:.0%}\n")
+    print(recommend.render(rec, show_all=args.all))
+
+    bets = rec[rec["flag"] == "+EV"]
+    print(f"\n{len(bets)} +EV bet(s), {bets['stake_units'].sum():.2f}u total stake "
+          f"(quarter Kelly, 1u = 1% of bankroll, max {recommend.MAX_STAKE_UNITS:g}u per bet)")
+    if not live and len(bets) and (bets["result"] != "").any():
+        g = bets[bets["result"] != ""]
+        w, l, pu = (g["result"] == "W").sum(), (g["result"] == "L").sum(), (g["result"] == "P").sum()
+        print(f"Result: {w}-{l}-{pu}, {g['units'].sum():+.2f}u")
+    print("Implied = break-even % of the price. Model = model's win % when the bet doesn't push.\n"
+          "Edge = expected profit per $1 bet. Kelly = full-Kelly bankroll share.")
+    if not args.all:
+        print("Use --all to also see bets that didn't clear the threshold.")
+    out = ROOT / "picks" / f"recommend_{start.date()}.csv"
+    out.parent.mkdir(exist_ok=True)
+    rec.to_csv(out, index=False)
+    print(f"Saved {out.relative_to(ROOT)}")
+
+
 def cmd_grade(args):
     games = load_games(refresh=not args.no_refresh)
     df = track.grade_all(games)
@@ -192,10 +258,17 @@ def main():
     p = sub.add_parser("predict"); p.add_argument("--week", type=int); p.add_argument("--season", type=int)
     b = sub.add_parser("backtest"); b.add_argument("--from", dest="start", type=int, default=2015)
     sub.add_parser("ratings"); sub.add_parser("grade")
+    r = sub.add_parser("recommend", help="+EV bets for a game day, live or historical")
+    r.add_argument("--date", help="YYYY-MM-DD (default: next game day)")
+    r.add_argument("--days", type=int, default=1, help="number of days from --date (default 1)")
+    r.add_argument("--min-edge", type=float, default=0.02, help="flag bets with edge above this (0.02 = 2%%)")
+    r.add_argument("--markets", default="spread,ml,total", help="comma list of spread,ml,total")
+    r.add_argument("--all", action="store_true", help="show every side, not just flagged bets")
     for s in sub.choices.values():
         s.add_argument("--no-refresh", action="store_true", help="use cached data, no downloads")
     args = ap.parse_args()
-    {"predict": cmd_predict, "backtest": cmd_backtest, "ratings": cmd_ratings, "grade": cmd_grade}[args.cmd](args)
+    {"predict": cmd_predict, "backtest": cmd_backtest, "ratings": cmd_ratings, "grade": cmd_grade,
+     "recommend": cmd_recommend}[args.cmd](args)
 
 
 if __name__ == "__main__":

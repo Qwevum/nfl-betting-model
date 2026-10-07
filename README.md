@@ -20,7 +20,33 @@ python run.py predict --week 6   # a specific week
 python run.py ratings            # current team power ratings
 python run.py grade              # after the games: record, units, closing-line value
 python run.py backtest           # walk-forward test against closing lines, 2015-now
+python run.py recommend          # +EV bets for the next game day (table below)
 ```
+
+### `recommend`: model probability vs implied probability
+
+```bash
+python run.py recommend                          # next game day, live odds
+python run.py recommend --date 2026-10-11        # a specific day
+python run.py recommend --date 2026-10-08 --days 5   # Thu-Mon of a week
+python run.py recommend --date 2026-09-27        # past day: closing lines + results
+python run.py recommend --min-edge 0.03 --markets spread,ml --all
+```
+
+For every side of every game it takes the best available price and shows:
+
+| column | meaning |
+|---|---|
+| Implied | break-even win % of the price (`implied_probability`: -110 → 52.4%, +150 → 40.0%) |
+| Model | the model's win % for that bet, excluding pushes |
+| Edge | expected profit per $1: `p_win × (decimal odds − 1) − p_lose` |
+| Kelly | full-Kelly bankroll share `(b·p − q) / b`; Stake is quarter Kelly, max 2u |
+| Flag | `+EV` when Edge > `--min-edge` (default 2%); `CHECK NEWS` when the model's own line is 4+ pts off the market |
+
+Upcoming dates use live odds (nflverse consensus, The Odds API if `ODDS_API_KEY`
+is set, and `odds_manual.csv`). Past dates use the closing lines, fit the model
+only on games before that date, and grade each bet. Each run saves a CSV to
+`picks/recommend_<date>.csv`.
 
 `predict` prints a sheet like this, and saves it under `picks/`:
 
