@@ -1,0 +1,8 @@
+# Lines you copy from your own sportsbook apps. The model picks the best EV across all books.
+# market: spread | ml | total     side: home | away | over | under
+# point: spread from that side's view (e.g. -3.5), the total number for totals, blank for ml
+# Example rows (remove the leading # to use):
+# book,away,home,market,side,point,price
+# draftkings,KC,BUF,spread,away,+2.5,-110
+# fanduel,KC,BUF,ml,away,,+120
+book,away,home,market,side,point,price
