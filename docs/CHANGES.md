@@ -367,3 +367,47 @@ replay bets) because of:
 * change 5 (no wind)
 * one more played game in the refreshed schedule (TB @ DAL)
 * identical-row scoring
+
+## 7. Additional data, tested one group at a time against the unchanged baseline
+
+**Problem:** Phase 3. Test candidate data without contaminating the holdout or
+counting the same information twice.
+
+**Source checks:** all four groups come from nflverse-data releases.
+* **Access:** verified from this environment.
+* **Licence and cost:** CC-BY 4.0, free. Snap counts originate at Pro Football
+  Reference and are redistributed by nflverse.
+* **Coverage:**
+  * play-by-play: 2010–2026 used
+  * snap counts: 2013–2026 (the 2012 file is empty)
+  * injury reports: 2013–2026, all 32 teams, every week
+  * gsis ↔ pfr id crosswalk: 99.9% of Out/Doubtful players map
+* **Update frequency:** daily during the season. Server Last-Modified on
+  2026-10-09 for snap counts, 2026-10-07 for injuries. The nflverse schedule
+  page is blocked here, so frequency was inferred from those timestamps.
+* **Timestamps:** the injury feed has **no publish times**, so G3's timing is
+  inferred from NFL reporting rules.
+
+**Files:**
+* new: `nflmodel/availability.py`, `nflmodel/experiment.py`,
+  `tests/test_experiment.py`, `docs/EXPERIMENTS.md`, `logs/experiments.jsonl`
+* changed: `nflmodel/data.py` (cache v3 with rushing EPA and neutral pace),
+  `nflmodel/ratings.py` (experimental ratings and `EXPERIMENT_GROUPS`),
+  `nflmodel/model.py` / `validate.py` (`total_features`), `run.py` (`experiment`)
+
+**Protocol:** pre-registered in `docs/EXPERIMENTS.md` before any run, and
+committed separately (`d3260e0`).
+* Development seasons are 2015–2021; the holdout is 2022–2026.
+* Only one group is added at a time, with no tuning.
+* The acceptance rule is fixed in advance.
+* The holdout can run once per group and only after a development pass. Code
+  enforces this (`ProtocolError`), and 2 new tests cover it.
+
+**Verification:**
+* Baseline development-season results are unchanged after adding the new
+  rating fields (max difference 5e-5, the report's rounding).
+* The suite passes: 58 tests.
+
+**Measured effect:** none of G1–G4 passes (table in `docs/EXPERIMENTS.md`).
+No holdout run was made, and no group was promoted. G2 and G3 slightly lower
+the model's own-line error but don't improve the market-anchored probabilities.
