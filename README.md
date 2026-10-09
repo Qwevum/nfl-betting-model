@@ -10,16 +10,19 @@ logged before kickoff and graded afterwards.
 
 ```bash
 pip install -r requirements.txt       # Python 3.10+
-python -m unittest discover tests     # betting-math checks
+python -m unittest discover tests     # 58 regression tests
 ```
 
 ## Weekly workflow
 
 ```bash
-python run.py predict                 # report for the upcoming week + log every prediction
+python run.py collect                 # snapshot quotes + injury reports (run on a schedule)
+python run.py predict                 # report for the upcoming week; records every forecast
 python run.py recommend               # compact table for the next game day
-python run.py grade                   # after games: probability quality, bets, passes, CLV
-python run.py validate                # out-of-sample validation (about 2 minutes)
+python run.py place --forecast ID --stake 1   # record a wager you actually placed
+python run.py grade                   # forecasts, recommendations and wagers, graded separately
+python run.py verify-log              # integrity check of all hash-chained logs
+python run.py validate                # out-of-sample validation (about 6 minutes)
 ```
 
 `predict` writes `reports/<season>_week<NN>.md`, with one section per game:
@@ -104,8 +107,9 @@ travel distance, confirmed inactives, and timestamped book prices unless you sup
    QB is not counted twice.
 3. **Model line** (`nflmodel/model.py`). Ridge regression on those features gives
    the model's own margin and total. A second regression adds the market line.
-4. **Market-anchored probability**. The estimate starts from the consensus
-   no-vig probability. A calibration fit only on past seasons' out-of-sample
+4. **Market-anchored probability**. The estimate starts from the market's
+   no-vig probability: the live multi-book reference built without the offer's
+   own book, or the untimed nflverse consensus as a labelled fallback. A calibration fit only on past seasons' out-of-sample
    predictions, `sigmoid(a + b·logit(market) + c·(model − line))`, decides how far
    the model may move it. Currently `c` is about 0 for spreads, so the model adds
    nothing there; it is small and positive for totals and moneylines.
