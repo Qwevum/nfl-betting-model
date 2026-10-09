@@ -1,0 +1,14 @@
+{
+  "schedule_scores_lines": {
+    "url": "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv",
+    "retrieved_utc": "2026-10-09T14:34:44Z",
+    "last_modified": null,
+    "latest_result_in_data": "2026-10-08"
+  },
+  "injury_reports": {
+    "url": "https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_2026.parquet",
+    "retrieved_utc": "2026-10-09T14:34:45Z",
+    "last_modified": "Fri, 09 Oct 2026 14:19:06 GMT",
+    "latest_week_in_data": 5
+  }
+}

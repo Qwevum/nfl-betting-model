@@ -1,0 +1,17 @@
+{
+  "notes": [
+    "ODDS_API_KEY not set: no live bookmaker feed"
+  ],
+  "run_utc": "2026-10-09T14:34:44Z",
+  "settings": {
+    "clock_skew_minutes": 2.0,
+    "gap_points": 4.0,
+    "horizon_minutes": 60.0,
+    "kelly_fraction": 0.25,
+    "kickoff_match_minutes": 10.0,
+    "max_odds_age_minutes": 30.0,
+    "max_stake_units": 2.0,
+    "min_edge": 0.02,
+    "min_reference_books": 2
+  }
+}

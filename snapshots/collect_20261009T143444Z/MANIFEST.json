@@ -1,0 +1,11 @@
+{
+  "consensus.csv": "41e1efe2519771108e1946d43ad2b183e3ef00dab3ba7a2cac99bd9671712536",
+  "injuries.parquet": "5c8899b0bb7ca0ca50216d1be7c23cfe57d4e2bee018c732770bd9ef7b120f89",
+  "meta.json": "0032e476d6fd1eedbcf7d4b2a412b9e68f2b3f1e7bed9a14fc8381e12cd0b202",
+  "odds_manual.csv": "9f469265df68d862f2041f43a7bd03b58c41abdbe3d27811b91a484dd284dc09",
+  "offers_raw.csv": "10e5c62d91b4276e287be6e40545febac57a218c3d805f075bb7f42f30cf7a1a",
+  "offers_rejected.csv": "40c5e6a56189c1426c366625c198fb88553cc0fa2c679ac6a5c3a03f37f36bd5",
+  "offers_valid.csv": "2d12a716b18a9d9562623f2aabaed52a4e10e8020586635d84c358b455696679",
+  "schedule_rows.csv": "6471413baf7883b65a8529bb651f6c9a6f2cf95db729443fd8f7f818ae27f01f",
+  "sources.json": "5e9a8b25d0cfe3b358a355b6c6d237e6eac38a2712a4a993a4bbff24c1edb17a"
+}
