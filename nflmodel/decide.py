@@ -8,13 +8,20 @@ For each game this module assembles:
 and for each market/side:
   * model probability, the price's implied probability, the market's no-vig
     probability, EV at the actual price, and how EV moves if the model is off
-  * a decision: BET, BET IF PRICE AVAILABLE (only a consensus price was seen), or
-    NO BET, with the reasons.
+  * a decision, with the reasons:
+      BET                    executable: validated, timestamped book price, live
+                             reference without that book, nothing left to confirm
+      BET IF CONFIRMED       executable price, but something must be confirmed first
+                             (e.g. a starter whose availability is unknown)
+      BET IF PRICE AVAILABLE conditional: price unverified (untimed consensus, or no
+                             live reference without that book)
+      NO BET
 
 No-bet rules (any one is enough):
   1. EV at the available price is not above the threshold (default 2%).
   2. The edge is fragile: EV is not positive if the true line is 0.5 point worse.
-  3. The projected starting QB is listed Out/Doubtful/Questionable, or unknown.
+  3. The projected starting QB is listed Out/Doubtful/Questionable, or not listed.
+     (Unknown availability, e.g. no injury report yet, only makes a bet conditional.)
   4. The model's own line differs from the market by 4+ points (unexplained).
   5. Totals in outdoor or unknown-roof stadiums without a weather forecast.
 """
@@ -44,6 +51,9 @@ class GameContext:
     assumptions: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     block: dict[str, list[str]] = field(default_factory=lambda: {"spread": [], "ml": [], "total": []})
+    # Conditions that must be confirmed before a bet becomes executable (e.g. a starter
+    # whose availability is unknown). They downgrade a bet to "BET IF ...", never up.
+    conditions: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
 
 
@@ -70,21 +80,46 @@ def _injury_lines(inj: pd.DataFrame, team: str, week: int) -> tuple[list[str], i
     return lines, wk, bool(issued)
 
 
-def _qb_status(inj: pd.DataFrame, qb_id, team: str, week: int):
-    if not isinstance(qb_id, str) or inj is None or inj.empty:
-        return None, None
-    r = inj[(inj["gsis_id"] == qb_id) & (inj["team"] == team) & (inj["week"] == week)]
-    if r.empty:
-        return None, None
-    r = r.iloc[-1]
-    return (r.report_status if pd.notna(r.report_status) else None,
-            r.practice_status if pd.notna(r.practice_status) else None)
+def starter_status(inj: pd.DataFrame, feed_ok: bool, qb_id, team: str, week: int) -> tuple[str, str]:
+    """Availability of a projected starter from the injury feed.
+
+    Returns (state, detail) with state one of:
+      available     - final game statuses for this team/week are issued and the QB
+                      has no Out/Doubtful/Questionable designation
+      ruled_out     - listed Out or Doubtful
+      questionable  - listed Questionable
+      unknown       - feed unavailable, no report for this team/week, or game
+                      statuses not issued yet. Missing data is NOT treated as healthy.
+    """
+    if not isinstance(qb_id, str):
+        return "unknown", "projected starter not listed"
+    if not feed_ok or inj is None or inj.empty:
+        return "unknown", "injury feed unavailable"
+    team_wk = inj[(inj["team"] == team) & (inj["week"] == week)]
+    if team_wk.empty:
+        return "unknown", f"no week {week} injury report for {team} in the feed yet"
+    me = team_wk[team_wk["gsis_id"] == qb_id]
+    status = me["report_status"].dropna().iloc[-1] if len(me) and me["report_status"].notna().any() else None
+    practice = me["practice_status"].dropna().iloc[-1] if len(me) and me["practice_status"].notna().any() else None
+    if status in ("Out", "Doubtful"):
+        return "ruled_out", f"listed {status}"
+    if status == "Questionable":
+        return "questionable", f"listed Questionable (practice: {practice or 'n/a'})"
+    if team_wk["report_status"].notna().any():
+        return "available", ("no game-status designation on the final report"
+                             + (f" (practice: {practice})" if practice else ""))
+    return "unknown", ("game statuses not issued yet"
+                       + (f"; practice: {practice}" if practice else "; not on the practice report"))
 
 
 def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: float,
-                  overrides: dict, weather: dict) -> GameContext:
+                  overrides: dict, weather: dict, injury_feed_ok: bool | None = None) -> GameContext:
     """g: one prediction row (namedtuple) for an upcoming game."""
     c = GameContext()
+    if injury_feed_ok is None:
+        injury_feed_ok = inj is not None and not inj.empty and "error" not in sources.get("injury_reports", {})
+    if not injury_feed_ok:
+        c.missing.append("Injury feed unavailable: availability of every player is unknown")
     sched = sources.get("schedule_scores_lines", {})
     sched_tag = f"[nflverse schedule, retrieved {sched.get('retrieved_utc', '?')}]"
     inj_src = sources.get("injury_reports", {})
@@ -106,23 +141,25 @@ def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: fl
         if ov:
             c.assumptions.append(f"{team} starter set to {ov['qb_name']} by qb_overrides.csv "
                                  f"(source: {ov.get('source') or 'not given'}, confirmed {ov['confirmed_utc']})")
-        if not isinstance(qb_id, str):
+        if not isinstance(qb_id, str) and not ov:
             c.missing.append(f"{team} projected starting QB not listed")
             for m in c.block:
                 c.block[m].append(f"{team} starting QB unknown")
             continue
-        c.facts.append(f"{team} projected starter: {qb_name} {sched_tag} (projection, not official until inactives)")
-        status, practice = _qb_status(inj, qb_id, team, week)
-        if status or practice:
-            c.facts.append(f"{qb_name} week {week} injury report: status {status or 'none'}, "
-                           f"practice: {practice or 'n/a'} {inj_tag}")
-        if status in UNSURE and not ov:
+        if not ov:
+            c.facts.append(f"{team} projected starter: {qb_name} {sched_tag} (projection, not official until inactives)")
+        state, detail = starter_status(inj, injury_feed_ok, qb_id, team, week)
+        if state == "unknown":
+            c.missing.append(f"{qb_name} ({team}) availability unknown: {detail}")
+        else:
+            c.facts.append(f"{qb_name} availability: {detail} {inj_tag}")
+        if ov:
+            pass  # a confirmed starter from qb_overrides.csv settles the starter question
+        elif state in ("ruled_out", "questionable"):
             for m in c.block:
-                c.block[m].append(f"{team} projected starter {qb_name} is {status}")
-        elif status is None and practice and practice.startswith("Did Not") and not ov:
-            c.missing.append(f"{qb_name} did not practice; game status not yet issued")
-            for m in c.block:
-                c.block[m].append(f"{team} projected starter {qb_name} did not practice (status pending)")
+                c.block[m].append(f"{team} projected starter {qb_name} is {detail.replace('listed ', '')}")
+        elif state == "unknown":
+            c.conditions.append(f"{qb_name} confirmed as {team}'s starter")
         if abs(delta) >= 0.02:
             pts = delta * coefs.get("f_qb", 0.0)
             c.assumptions.append(
@@ -369,14 +406,19 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
         reasons += ctx.block.get(market, [])
         if reasons:
             rec["decision"] = "NO BET"
-        elif rec["price_source"] in BOOK_SOURCES_WITH_TIME and ref is not None:
+        elif rec["price_source"] in BOOK_SOURCES_WITH_TIME and ref is not None and not ctx.conditions:
             rec["decision"] = "BET"
+        elif ctx.conditions and rec["price_source"] in BOOK_SOURCES_WITH_TIME and ref is not None:
+            rec["decision"] = "BET IF CONFIRMED"
+            reasons.append("only if: " + "; ".join(ctx.conditions))
         else:
             rec["decision"] = "BET IF PRICE AVAILABLE"
             why = ("only an untimed consensus price was seen" if rec["price_source"] not in BOOK_SOURCES_WITH_TIME
                    else "no live market reference without this book")
             reasons.append(f"{why}; confirm at your book "
                            f"(still +{min_edge:.0%} EV at {_fmt_price(rec['min_price'])} or better at this line)")
+            if ctx.conditions:
+                reasons.append("and only if: " + "; ".join(ctx.conditions))
         rec["reasons"] = " | ".join(reasons)
         rec["stake_units"] = (round(min(rec["kelly"] * KELLY_FRACTION * 100, MAX_STAKE_UNITS), 2)
                               if rec["decision"] != "NO BET" else 0.0)

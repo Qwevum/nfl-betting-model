@@ -124,10 +124,17 @@ travel distance, confirmed inactives, and timestamped book prices unless you sup
 * the model's own line is 4+ pts from the market (unexplained)
 * the bet is a total for an outdoor or unknown-roof game with no forecast
 
-**BET IF PRICE AVAILABLE** means it passes, but only a consensus price was
-seen; the report gives the worst price that is still +EV.
-
-**BET** means it passes on a timestamped price from a book.
+There are three passing tiers:
+* **BET** (executable): a validated, timestamped book price; a live reference
+  built without that book; and nothing left to confirm.
+* **BET IF CONFIRMED** (conditional): an executable price, but something must
+  be confirmed first. The usual case is a starter whose availability is
+  unknown: the injury feed failed, the team's report for the week isn't out,
+  or game statuses aren't issued yet. Missing injury data is never read as
+  "healthy". A confirmed starter in `qb_overrides.csv` settles it.
+* **BET IF PRICE AVAILABLE** (conditional): the price is unverified, either an
+  untimed consensus price or no live reference without that book. The report
+  gives the worst price that is still +EV.
 
 Stakes are a quarter of Kelly, capped at 2 units (1u = 1% of bankroll).
 

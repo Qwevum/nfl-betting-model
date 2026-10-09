@@ -165,3 +165,45 @@ available. One quote could also define its own "market".
 multi-book snapshots to evaluate the reference against (see change 5). Untested
 in this sandbox: the reference built from real Odds API data, because the API
 is blocked here.
+
+## 3. Missing injury information means unknown availability
+
+**Problem:** audit issue 4. A projected starter with no injury designation was
+treated as healthy even when the feed had failed, or had no report for that
+team and week. On 2026-10-07 the feed held week-5 rows only for TB and DAL,
+so every Sunday starter counted as "available" by default.
+
+**Files:**
+* changed: `nflmodel/decide.py`, `README.md`
+* new: `tests/test_availability.py`
+
+**Change:** `starter_status()` returns one of four states:
+* `available`: final game statuses are issued for that team and week, and the
+  QB has no designation
+* `ruled_out`: listed Out or Doubtful
+* `questionable`: listed Questionable
+* `unknown`: the feed is unavailable, there is no report for the team and week,
+  or game statuses aren't issued yet
+
+Ruled-out and questionable starters block the bet. An unknown starter adds a
+condition, which downgrades an otherwise executable bet to "BET IF CONFIRMED".
+A confirmed starter from `qb_overrides.csv` settles the question.
+
+**Verification:**
+* 9 new tests:
+  * a failed or missing feed gives `unknown`
+  * no report for the team and week gives `unknown`
+  * a practice-only report gives `unknown`
+  * a final report without a designation gives `available`
+  * Out, Doubtful and Questionable map correctly
+  * a missing starter id gives `unknown`
+  * at decision level with a synthetic market-only model, a +EV quote (>5%)
+    becomes "BET IF CONFIRMED" when the feed is missing, "BET" once the final
+    report clears the starter, and "NO BET" when the starter is Questionable
+
+  The suite passes: 42 tests.
+* Replay at 2026-10-11T12:30Z with the cached Oct 7 feed: Hurts and Lawrence
+  are now listed as "availability unknown: no week 5 injury report for PHI/JAX".
+
+**Measured effect:** none on accuracy (a decision rule). Expect fewer executable
+recommendations early in the week.
