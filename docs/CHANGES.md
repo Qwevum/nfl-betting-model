@@ -277,3 +277,29 @@ recorded what was actually bet, and the exact inputs of a run were not kept.
 
 **Measured effect:** none on accuracy. One game is far too few to compare model
 and market; that comparison accumulates from here.
+
+## 5. Remove observed game-time wind (postgame knowledge) from the totals model
+
+**Problem:** `t_wind` was the wind measured at the game. Training and validation
+used it, but it is unknown at prediction time, and there are no historical
+forecasts to substitute. Live, upcoming games have no wind value, so the model
+silently used 0 mph for every outdoor game.
+
+**Files:** `nflmodel/ratings.py` (`TOTAL_FEATURES`).
+
+**Verification and measured effect** (walk-forward 2015–2026, same cached data
+for both arms, 3,065 totals):
+
+| | over-hits Brier | log loss | own-total MAE |
+|---|---|---|---|
+| with observed wind | 0.25022 | 0.69359 | 10.687 |
+| without wind | 0.25029 | 0.69373 | 10.697 |
+
+* Observed wind bought almost nothing, and that small gain was leakage.
+* The live bias it caused: the own-total coefficient was −0.224 pts/mph and
+  outdoor games average 7.7 mph. Unknown wind (0 mph) therefore raised an
+  average outdoor total by **+1.7 pts** in the model's own line, and **+0.4
+  pts** in the calibrated fair total.
+* Weather forecasts from `weather_manual.csv` are still required before an
+  outdoor total can be bet. They are reported as facts but don't enter the
+  model.

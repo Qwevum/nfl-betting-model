@@ -36,7 +36,10 @@ PARAMS = {
 }
 
 FEATURES = ["f_mrtg", "f_epa", "f_sr", "f_pass", "f_qb", "f_hfa", "f_rest", "f_div"]
-TOTAL_FEATURES = ["t_off", "t_def", "t_pace", "t_pts", "t_dome", "t_wind"]
+# t_wind (observed game-time wind) is NOT a model feature: it is postgame knowledge in
+# history, and no historical forecasts exist to replace it. It is kept as a column
+# for reports; live forecasts only drive the "no outdoor total without a forecast" rule.
+TOTAL_FEATURES = ["t_off", "t_def", "t_pace", "t_pts", "t_dome"]
 
 
 class _Team:
