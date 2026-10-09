@@ -33,6 +33,9 @@ PARAMS = {
     "qb_decay": 0.97,      # per-game weight decay of a QB's past dropbacks
     "qb_shrink": 150.0,    # dropbacks of prior weight in a QB rating
     "qb_new": 150.0,       # career dropbacks below which a QB counts as inexperienced
+    # Experiment G5 (docs/EXPERIMENTS.md), OFF by default (0 = current behaviour):
+    "preseason_qb_pts": 0.0,     # G5b: points of rating per unit EPA/dropback of a new-season QB change
+    "win_total_weight": 0.0,     # G5a: weight of the preseason win-total prior (needs params["win_totals"])
 }
 
 FEATURES = ["f_mrtg", "f_epa", "f_sr", "f_pass", "f_qb", "f_hfa", "f_rest", "f_div"]
@@ -53,7 +56,7 @@ EXPERIMENT_GROUPS = {
 
 class _Team:
     __slots__ = ("mrtg", "off", "def_", "osr", "dsr", "opass", "dpass", "pace", "pf", "pa", "season",
-                 "qb_base", "last_qb", "orush", "drush", "npace")
+                 "qb_base", "last_qb", "orush", "drush", "npace", "pending_season")
 
     def __init__(self, season: int, pace: float = 62.0, pts: float = 22.0):
         self.mrtg = self.off = self.def_ = self.osr = self.dsr = self.opass = self.dpass = 0.0
@@ -62,6 +65,7 @@ class _Team:
         self.last_qb = None
         self.orush = self.drush = 0.0
         self.npace = 32.5
+        self.pending_season = False      # True from a new season until the team's first game of it
 
     def new_season(self, season: int, carry: float, lg_pace: float, lg_pts: float) -> None:
         for name in ("mrtg", "off", "def_", "osr", "dsr", "opass", "dpass", "orush", "drush"):
@@ -70,6 +74,7 @@ class _Team:
         self.pf = lg_pts + carry * (self.pf - lg_pts)
         self.pa = lg_pts + carry * (self.pa - lg_pts)
         self.season = season
+        self.pending_season = True
 
 
 class QBRatings:
@@ -101,6 +106,35 @@ class QBRatings:
         self.N[qb_id] = d * self.N.get(qb_id, 0.0) + dropbacks
         self.career[qb_id] = self.career.get(qb_id, 0.0) + dropbacks
 
+def win_total_priors(path, games: pd.DataFrame, sd: float = 13.5) -> tuple[dict, list[str]]:
+    """G5a: {(season, team): prior margin} from data/preseason_win_totals.csv
+    (season, team, win_total, odds, retrieved_utc). Rows retrieved at or after the season's
+    first kickoff are rejected (they could carry in-season information); priors are centered
+    on the league each season. Returns (priors, rejection notes)."""
+    from statistics import NormalDist
+    df = pd.read_csv(path)
+    need = {"season", "team", "win_total", "retrieved_utc"}
+    if not need <= set(df.columns):
+        raise ValueError(f"{path} needs columns {sorted(need)}; has {list(df.columns)}")
+    g = games.copy()
+    g["gameday"] = pd.to_datetime(g["gameday"])
+    first = g.groupby("season")["gameday"].min()
+    notes, rows = [], []
+    for r in df.itertuples(index=False):
+        when = pd.to_datetime(r.retrieved_utc, utc=True, errors="coerce")
+        start = first.get(int(r.season))
+        if pd.isna(when) or start is None or when >= pd.Timestamp(start).tz_localize("UTC"):
+            notes.append(f"{r.season} {r.team}: retrieved_utc {r.retrieved_utc} not before the season's first game")
+            continue
+        games_n = 17 if int(r.season) >= 2021 else 16
+        q = min(max(float(r.win_total) / games_n, 0.02), 0.98)
+        rows.append((int(r.season), str(r.team), sd * NormalDist().inv_cdf(q)))
+    pri = pd.DataFrame(rows, columns=["season", "team", "m"])
+    if len(pri):
+        pri["m"] -= pri.groupby("season")["m"].transform("mean")
+    return {(s, tm): m for s, tm, m in pri.itertuples(index=False)}, notes
+
+
 def build_features(games: pd.DataFrame, team_games: pd.DataFrame, qb_games: pd.DataFrame | None = None,
                    params: dict | None = None):
     """Return (games-with-features, final team ratings table, QBRatings)."""
@@ -125,7 +159,21 @@ def build_features(games: pd.DataFrame, team_games: pd.DataFrame, qb_games: pd.D
                 teams[t] = _Team(season, lg["pace"], lg["pts"])
             elif teams[t].season != season:
                 teams[t].new_season(season, p["carry"], lg["pace"], lg["pts"])
+                w_wt = p.get("win_total_weight", 0.0)
+                prior = (p.get("win_totals") or {}).get((season, t))
+                if w_wt and prior is not None:          # G5a: informed preseason prior
+                    teams[t].mrtg = (1 - w_wt) * teams[t].mrtg + w_wt * prior
         H, A = teams[h], teams[a]
+        # G5b: a new season's first game with a different starting QB moves the points rating
+        for T, qb_new in ((H, g.home_qb_id), (A, g.away_qb_id)):
+            if not T.pending_season:
+                continue
+            T.pending_season = False
+            pts = p.get("preseason_qb_pts", 0.0)
+            if pts and isinstance(qb_new, str) and isinstance(T.last_qb, str) and qb_new != T.last_qb:
+                new_r = qbr.rating(qb_new)
+                T.mrtg += pts * (new_r - qbr.rating(T.last_qb))
+                T.qb_base = new_r           # the change now lives in the rating, not in f_qb
         neutral = str(g.location) == "Neutral"
         rest = (g.home_rest if pd.notna(g.home_rest) else 7) - (g.away_rest if pd.notna(g.away_rest) else 7)
         dome = str(g.roof) in ("dome", "closed")

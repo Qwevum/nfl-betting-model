@@ -37,7 +37,8 @@ pd.set_option("display.width", 200)
 pd.set_option("display.max_columns", 30)
 
 
-def build(refresh: bool = True):
+def build(refresh: bool = True, params: dict | None = None):
+    """params: ratings parameter overrides (experiments only; None = ratings.PARAMS)."""
     print("Loading schedules, scores and lines ...")
     games = load_games(refresh=refresh)
     upcoming = games["result"].isna() & (games["gameday"] >= pd.Timestamp.today().normalize() - pd.Timedelta(days=1))
@@ -45,7 +46,7 @@ def build(refresh: bool = True):
     print("Loading play-by-play ...")
     tg, qg = load_team_games(list(range(FIRST_PBP_SEASON, current + 1)), refresh_current=refresh)
     print("Building ratings ...")
-    feat, table_, qbr = build_features(games, tg, qg)
+    feat, table_, qbr = build_features(games, tg, qg, params=params)
     feat["kickoff_utc"] = [_kick(d, t) for d, t in zip(feat["gameday"], feat["gametime"])]
     return games, feat, table_, current, qbr
 
@@ -723,12 +724,58 @@ def cmd_experiment(args):
         raise SystemExit("Experiments are recorded against a commit; commit your changes first.")
     _, feat, _, _, _ = build(refresh=not args.no_refresh)
     last = int(feat.loc[feat["result"].notna(), "season"].max())
+    if args.group in experiment.ALT_GROUPS:
+        return _alt_experiment(args, experiment, version, last)
     if args.group in ("G3", "G4"):
         print("Building snap-count availability / OL continuity table ...")
         tbl = availability.team_game_table(list(range(availability.FIRST_SEASON, last + 1)))
         feat = availability.add_features(feat, tbl)
     print(f"Running {args.group} on {'HOLDOUT' if args.holdout else 'development'} seasons ...")
     rec = experiment.run(feat, args.group, args.holdout, last, version)
+    print(f"\n{rec['group']} ({rec['period']}, seasons {rec['seasons'][0]}-{rec['seasons'][-1]}): {rec['verdict']}")
+    for t in ("winner", "home covers", "over hits"):
+        x = rec["results"][t]
+        print(f"  {t:12s} n={x['n']}  log loss {x['logloss_base']:.5f} -> {x['logloss_exp']:.5f}  "
+              f"diff {x['d_logloss']:+.5f} (95% CI {x['ci_lo']:+.5f} to {x['ci_hi']:+.5f})  "
+              f"improved {x['seasons_improved']}/{x['seasons']} seasons")
+    m = rec["results"]["own_line_mae"]
+    print(f"  own-line MAE margin {m['margin_base']:.3f} -> {m['margin_exp']:.3f}, "
+          f"total {m['total_base']:.3f} -> {m['total_exp']:.3f}")
+
+
+def _alt_experiment(args, experiment, version: str, last: int) -> None:
+    """G5 / G6: arms that rebuild the ratings with different parameters (docs/EXPERIMENTS.md)."""
+    from nflmodel.ratings import PARAMS
+    cache: dict = {}
+
+    def feats(params: dict):
+        key = tuple(sorted(params.items()))
+        if key not in cache:
+            cache[key] = build(refresh=False, params=params)[1]
+        return cache[key]
+    base = dict(PARAMS)
+    if args.group == "G5":
+        if (ROOT / "data" / "preseason_win_totals.csv").exists():
+            print("data/preseason_win_totals.csv found: G5a is pre-registered but run separately; running G5b only.")
+        exp_params, details = {**base, **experiment.G5_PARAMS}, {"variant": "G5b", "params": experiment.G5_PARAMS}
+    else:
+        if args.holdout:
+            done = [r for r in experiment.history("G6") if r["period"] == "development" and r["passed"]]
+            if not done:
+                raise SystemExit("G6 has not passed the development criteria; holdout not allowed")
+            exp_params = done[-1]["details"]["best_params"]
+            details = {"best_params": exp_params}
+        else:
+            print("G6 search: current values, 12 one-at-a-time moves, then the combined improving moves ...")
+            exp_params, tried = experiment.g6_search(feats, base, version)
+            for r in tried:
+                print(f"  {r['config']:45s} own-line MAE {r['own_line_mae_margin']:.4f} / total "
+                      f"{r['own_line_mae_total']:.4f}; home-covers log loss {r['logloss_home covers']:.5f}")
+            details = {"best_params": exp_params,
+                       "changed": {k: v for k, v in exp_params.items() if base.get(k) != v}}
+    print(f"Running {args.group} on {'HOLDOUT' if args.holdout else 'development'} seasons "
+          f"(changed: {({k: v for k, v in exp_params.items() if base.get(k) != v})}) ...")
+    rec = experiment.run_alt(feats(base), feats(exp_params), args.group, args.holdout, last, version, details)
     print(f"\n{rec['group']} ({rec['period']}, seasons {rec['seasons'][0]}-{rec['seasons'][-1]}): {rec['verdict']}")
     for t in ("winner", "home covers", "over hits"):
         x = rec["results"][t]
@@ -1079,7 +1126,7 @@ def main():
     sub.add_parser("verify-log", help="check the forecast history and ledger hash chains")
     sub.add_parser("compare-models", help="legacy vs model vs market-only probabilities (dev seasons)")
     ex = sub.add_parser("experiment", help="ablate one feature group (docs/EXPERIMENTS.md)")
-    ex.add_argument("--group", required=True, choices=["G1", "G2", "G3", "G4"])
+    ex.add_argument("--group", required=True, choices=["G1", "G2", "G3", "G4", "G5", "G6"])
     ex.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
     ck = sub.add_parser("check-live", help="check the live bookmaker feed (never shows the key; writes nothing)")
     ck.add_argument("--days", type=float, default=7, help="games kicking off within this many days")
