@@ -33,6 +33,23 @@ from nflmodel.report import table
 from nflmodel.ratings import build_features
 
 ROOT = Path(__file__).resolve().parent
+
+
+def load_dotenv(path: Path = ROOT / ".env") -> None:
+    """Read KEY=VALUE lines from .env; variables already set in the environment win."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if k and v:
+            os.environ.setdefault(k, v)
+
+
+load_dotenv()
 pd.set_option("display.width", 200)
 pd.set_option("display.max_columns", 30)
 
