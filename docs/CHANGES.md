@@ -303,3 +303,67 @@ for both arms, 3,065 totals):
 * Weather forecasts from `weather_manual.csv` are still required before an
   outdoor total can be bet. They are reported as facts but don't enter the
   model.
+
+## 6. Evaluation that matches live use, and honest uncertainty
+
+**Problem:** audit issue 6.
+* Model and market were scored on different game sets.
+* Confidence intervals treated bets on the same game as independent.
+* Drawdown was not reported.
+* The README called the historical replay "the live rules".
+* There was no statement of what each historical input knew relative to the
+  prediction horizon.
+
+**Files:**
+* changed: `nflmodel/validate.py`, `nflmodel/metrics.py` (vectorized cluster
+  bootstrap), `nflmodel/store.py`, `run.py` (`validate`, new `collect`),
+  `README.md`, `reports/validation*.md`
+* new: `tests/test_validation.py`
+
+**Change:**
+* `validate.py` documents the 60-minute horizon and, per input, whether it was
+  available by then. Market prices are the binding gap: only closing lines
+  exist historically.
+* Every predictor is scored on identical rows. Results include Brier, log loss
+  and ECE.
+* The model − market Brier difference gets a game-level bootstrap CI and a
+  per-season table.
+* Calibration is shown for model and market.
+* Betting replay:
+  * game-clustered ROI CIs
+  * flat and quarter-Kelly max drawdown
+  * per-season results with each season's median overround
+  * a sensitivity replay at standard retail juice (4.76%)
+* The text states which decision rules the replay can and can't apply.
+* `collect` snapshots validated quotes, injury reports and source times for
+  upcoming games without the model. Each snapshot is indexed in hash-chained
+  `logs/collections.jsonl`. Nothing is backfilled.
+
+**Verification:**
+* 3 new tests:
+  * a missing market value removes the row for every predictor
+  * the difference row equals the Brier gap
+  * re-pricing hits the target overround while keeping no-vig probabilities
+
+  The cluster-bootstrap test now checks the vectorized version. The suite
+  passes: 56 tests.
+
+**Measured results** (2015 to 2026 week 5, cached data):
+* **Winner:** model 0.21283 vs market 0.21271 (+0.00012, 95% CI −0.00051 to
+  +0.00068).
+* **Covers:** +0.00026 (−0.00064 to +0.00118).
+* **Overs:** +0.00034 (−0.00047 to +0.00111).
+* **Replay at recorded prices:** +3.0% (−3.1% to +8.9%, game-clustered; 1,264
+  bets on 1,008 games).
+* **Replay at 4.76% juice:** +1.4% (−7.6% to +10.7%; 537 bets).
+
+**New finding:** the consensus prices' overround is about 2.4% through 2022 and
+about 4.7% from 2023. Every replay bet but one falls in 2015–2022, so the earlier
+headline ROI depended on reduced-juice prices. **No claim of improved accuracy
+or profitability is supported.**
+
+**Numbers changed vs the baseline** (2,126 → 2,128 winner Brier, 1,333 → 1,264
+replay bets) because of:
+* change 5 (no wind)
+* one more played game in the refreshed schedule (TB @ DAL)
+* identical-row scoring

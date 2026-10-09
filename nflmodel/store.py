@@ -25,6 +25,7 @@ from .timeutil import fmt, now_utc, parse_utc
 ROOT = Path(__file__).resolve().parent.parent
 FORECASTS = ROOT / "logs" / "forecasts.jsonl"
 LEDGER = ROOT / "logs" / "ledger.jsonl"
+COLLECTIONS = ROOT / "logs" / "collections.jsonl"
 SNAPSHOTS = ROOT / "snapshots"
 GENESIS = "0" * 64
 

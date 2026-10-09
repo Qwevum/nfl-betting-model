@@ -1,34 +1,82 @@
 """Out-of-sample validation against baselines and the market.
 
-Walk-forward: every test season is predicted by a model fit (and calibrated) only
-on earlier seasons. Ratings feeding each game use only games before it.
+Chronology: every test season is predicted by a model whose ratings use only
+earlier games, whose regressions are fit only on earlier seasons, and whose
+calibration (k shrinkage, market-anchored logistic) is fit by an inner
+walk-forward that is also restricted to earlier seasons.
 
-Information-timing notes (what a historical prediction "knew"):
-  * Prices are nflverse consensus closing lines: available just before kickoff.
-  * Starting QBs are the actual starters. Those are normally known ~90 minutes
-    before kickoff (inactives); live predictions use projected starters instead.
-  * Game-time wind/temperature are observed values; live predictions would need a
-    forecast. This makes historical totals slightly easier than live ones.
-  * Model design choices (features, hyperparameters, calibration method) were made
-    after looking at 2015-2025 results, so those seasons are not a pristine
-    holdout. The pristine test is the prediction log written from now on.
+Prediction horizon: live forecasts are meant for kickoff - 60 minutes
+(settings.horizon_minutes). What each historical input knew relative to that
+horizon:
+
+  input                    | historical source                 | available by horizon?
+  -------------------------|-----------------------------------|-----------------------------
+  team/QB ratings          | play-by-play of earlier games     | yes
+  rest, division, site     | schedule                          | yes
+  starting QB              | actual starter (nflverse)         | yes in practice: inactives are
+                           |                                   | published ~90 min before kickoff
+  roof (dome/closed)       | schedule, observed roof state     | assumed: retractable-roof calls are
+                           |                                   | usually announced before the horizon
+  weather                  | not used (observed wind removed)  | n/a, no historical forecasts exist
+  injury reports           | not used historically             | n/a, the feed has no publish times
+  market prices            | nflverse CLOSING consensus        | NO: the close is after the horizon
+
+Market prices are the binding limitation: no timestamped historical multi-book
+snapshots exist in this repository, so model and market are both evaluated at the
+CLOSING information set (the market's best case), on exactly the same games.
+Horizon-matched data is collected from now on by `run.py collect` / `predict`
+snapshots; nothing is backfilled.
+
+Decision rules replayed historically: EV > min_edge at the consensus closing price,
+robustness to a 0.5-point error, and the 4-point model-vs-market gap rule. NOT
+replayed (no data): quote timestamps/freshness, the multi-book leave-one-book-out
+reference, starter-availability conditions, the outdoor-total weather rule, and the
+executable/conditional distinction. Historical "bets" are therefore closer to
+"conditional recommendations at the closing consensus price" than to live
+executable bets.
+
+Model design choices (features, hyperparameters, calibration method) were made
+after looking at 2015-2025 results, so those seasons are not a pristine holdout.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from . import decide
+from . import decide, metrics
 from .backtest import grade, profit
-from .model import _logistic, fit
+from .model import _logistic, fit, novig_first
 from .odds import consensus_offers, no_vig
 from .ratings import FEATURES
 
 
-def _bl(p, y):
-    p = np.clip(np.asarray(p, float), 1e-6, 1 - 1e-6)
-    y = np.asarray(y, float)
-    return float(np.mean((p - y) ** 2)), float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+def revig(test: pd.DataFrame, overround: float) -> pd.DataFrame:
+    """Re-price every consensus two-way pair at a fixed overround (proportional), keeping
+    each pair's no-vig probabilities. Used to replay history at standard retail juice."""
+    def price(implied):
+        implied = np.clip(implied, 1e-6, 1 - 1e-6)
+        return np.where(implied >= 0.5, -100 * implied / (1 - implied), 100 * (1 - implied) / implied)
+    out = test.copy()
+    for a, b in (("home_spread_odds", "away_spread_odds"), ("over_odds", "under_odds"),
+                 ("home_moneyline", "away_moneyline")):
+        ok = out[a].notna() & out[b].notna()
+        if not ok.any():
+            continue
+        pa = np.asarray(novig_first(out.loc[ok, a], out.loc[ok, b]), float)
+        out.loc[ok, a] = np.round(price(pa * (1 + overround)))
+        out.loc[ok, b] = np.round(price((1 - pa) * (1 + overround)))
+    return out
+
+
+def overround_by_season(feat: pd.DataFrame) -> pd.DataFrame:
+    g = feat[feat["result"].notna()]
+    def imp(x):
+        x = np.asarray(x, float)
+        return np.where(x < 0, -x / (-x + 100), 100 / (x + 100))
+    g = g.assign(spread_or=imp(g["home_spread_odds"]) + imp(g["away_spread_odds"]) - 1,
+                 ml_or=imp(g["home_moneyline"]) + imp(g["away_moneyline"]) - 1,
+                 total_or=imp(g["over_odds"]) + imp(g["under_odds"]) - 1)
+    return g.groupby("season")[["spread_or", "ml_or", "total_or"]].median().reset_index()
 
 
 def _decisions(model, test: pd.DataFrame, min_edge: float) -> pd.DataFrame:
@@ -45,7 +93,9 @@ def _decisions(model, test: pd.DataFrame, min_edge: float) -> pd.DataFrame:
 
 
 def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
-        features: list[str] | None = None, with_bets: bool = True):
+        features: list[str] | None = None, with_bets: bool = True, bet_overround: float | None = None):
+    """bet_overround: if set, the betting replay prices every bet at this fixed overround
+    (e.g. 0.0476 = -110/-110) instead of the recorded consensus prices."""
     played = feat[feat["result"].notna()]
     first = int(played["season"].min())
     preds, bets = [], []
@@ -84,9 +134,9 @@ def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
         preds.append(test)
 
         if with_bets:
-            d = _decisions(model, test, min_edge)
+            d = _decisions(model, revig(test, bet_overround) if bet_overround else test, min_edge)
             d = decide.best_per_market(d)
-            d = d.merge(test[["game_id", "season", "home_score", "away_score"]], on="game_id")
+            d = d.merge(test[["game_id", "season", "gameday", "home_score", "away_score"]], on="game_id")
             d["result"] = [grade(r.market, r.side, r.point, r.home_score, r.away_score)
                            for r in d.itertuples(index=False)]
             d["flat"] = [profit(r, p) for r, p in zip(d["result"], d["price"])]
@@ -98,58 +148,76 @@ def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
     return pd.concat(preds, ignore_index=True), (pd.concat(bets, ignore_index=True) if bets else None)
 
 
-def prob_table(p: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    ml = p[p["result"] != 0]
-    y = (ml["result"] > 0).to_numpy(float)
-    for name, col in (("model", "p_model"), ("market no-vig (closing)", "p_market"),
-                      ("ratings only (no market)", "p_ratings_only"),
-                      ("home-team base rate", "p_home_rate"), ("coin flip", None)):
-        m = ml if col is None else ml.dropna(subset=[col])
-        yy = (m["result"] > 0).to_numpy(float)
-        pp = np.full(len(m), 0.5) if col is None else m[col].to_numpy(float)
-        b, l = _bl(pp, yy)
-        rows.append({"target": "winner", "predictor": name, "n": len(m), "brier": b, "log_loss": l})
-    sp = p.dropna(subset=["p_cover"])
+def _targets(p: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Per target: rows where the model AND the market both have a probability (same games)."""
+    ml = p[(p["result"] != 0)].dropna(subset=["p_model", "p_market"]).assign(y=lambda d: (d["result"] > 0) * 1.0)
+    ml = ml.assign(pm=ml["p_model"], pk=ml["p_market"])
+    sp = p.dropna(subset=["p_cover", "p_cover_mkt", "spread_line"])
     sp = sp[sp["result"] != sp["spread_line"]]
-    y = (sp["result"] > sp["spread_line"]).to_numpy(float)
-    for name, pp in (("model", sp["p_cover"]), ("market no-vig (closing)", sp["p_cover_mkt"]),
-                     ("coin flip", np.full(len(sp), 0.5))):
-        b, l = _bl(pp, y)
-        rows.append({"target": "home covers", "predictor": name, "n": len(sp), "brier": b, "log_loss": l})
-    tt = p.dropna(subset=["p_over"])
+    sp = sp.assign(y=(sp["result"] > sp["spread_line"]) * 1.0, pm=sp["p_cover"], pk=sp["p_cover_mkt"])
+    tt = p.dropna(subset=["p_over", "p_over_mkt", "total_line"])
     tt = tt[tt["total"] != tt["total_line"]]
-    y = (tt["total"] > tt["total_line"]).to_numpy(float)
-    for name, pp in (("model", tt["p_over"]), ("market no-vig (closing)", tt["p_over_mkt"]),
-                     ("coin flip", np.full(len(tt), 0.5))):
-        b, l = _bl(pp, y)
-        rows.append({"target": "over hits", "predictor": name, "n": len(tt), "brier": b, "log_loss": l})
+    tt = tt.assign(y=(tt["total"] > tt["total_line"]) * 1.0, pm=tt["p_over"], pk=tt["p_over_mkt"])
+    return {"winner": ml, "home covers": sp, "over hits": tt}
+
+
+def prob_table(p: pd.DataFrame, n_boot: int = 1000) -> pd.DataFrame:
+    """Brier / log loss / ECE for every predictor on the SAME rows, plus a game-level
+    bootstrap CI of the model-minus-market Brier difference (negative = model better)."""
+    rows = []
+    for target, d in _targets(p).items():
+        preds = {"model": d["pm"], "market no-vig (closing)": d["pk"], "coin flip": pd.Series(0.5, index=d.index)}
+        if target == "winner":
+            preds["ratings only (no market)"] = d["p_ratings_only"]
+            preds["home-team base rate"] = d["p_home_rate"]
+        for name, pp in preds.items():
+            b, l = metrics.brier_logloss(pp, d["y"])
+            rows.append({"target": target, "predictor": name, "n": len(d), "brier": b, "log_loss": l,
+                         "ece": metrics.ece(pp, d["y"]) if name != "coin flip" else np.nan})
+        diff = d.assign(sq=(d["pm"] - d["y"]) ** 2 - (d["pk"] - d["y"]) ** 2)
+        est, lo, hi = metrics.cluster_bootstrap(diff, "game_id", "sq", n=n_boot)
+        rows.append({"target": target, "predictor": "model minus market (Brier)", "n": len(d),
+                     "brier": est, "log_loss": np.nan, "ece": np.nan, "ci95": f"{lo:+.5f} to {hi:+.5f}"})
     return pd.DataFrame(rows)
+
+
+def season_diffs(p: pd.DataFrame) -> pd.DataFrame:
+    """Model-minus-market Brier by season and target (negative = model better)."""
+    out = []
+    for target, d in _targets(p).items():
+        for season, g in d.groupby("season"):
+            out.append({"target": target, "season": season, "n": len(g),
+                        "model - market": float(((g["pm"] - g["y"]) ** 2).mean() - ((g["pk"] - g["y"]) ** 2).mean())})
+    return pd.DataFrame(out).pivot(index="season", columns="target", values="model - market").reset_index()
 
 
 def calibration(p: pd.DataFrame) -> pd.DataFrame:
-    ml = p[p["result"] != 0].copy()
-    ml["bin"] = pd.cut(ml["p_model"], [0, .1, .2, .3, .4, .5, .6, .7, .8, .9, 1])
-    return (ml.groupby("bin", observed=True)
-              .agg(n=("p_model", "size"), predicted=("p_model", "mean"),
-                   actual=("result", lambda r: (r > 0).mean()))
-              .reset_index())
+    d = _targets(p)["winner"]
+    m = metrics.calibration_table(d["pm"], d["y"]).rename(columns={"predicted": "model predicted", "actual": "actual"})
+    k = metrics.calibration_table(d["pk"], d["y"]).rename(columns={"n": "n (market)", "predicted": "market predicted",
+                                                                   "actual": "actual (market bins)"})
+    return m.merge(k, on="bin", how="outer")
 
 
-def bet_table(bets: pd.DataFrame) -> pd.DataFrame:
+def bet_table(bets: pd.DataFrame, n_boot: int = 1000) -> pd.DataFrame:
+    """Flat 1u and quarter-Kelly results with game-clustered bootstrap CIs and drawdown."""
     rows = []
-    b = bets[bets["decision"] != "NO BET"]
+    b = bets[bets["decision"] != "NO BET"].sort_values(["gameday", "game_id"])
     for market, g in list(b.groupby("market")) + [("all", b)]:
         w, l, p = (g["result"] == "W").sum(), (g["result"] == "L").sum(), (g["result"] == "P").sum()
-        n = w + l
-        win = w / n if n else np.nan
-        se_roi = g["flat"].std(ddof=1) / np.sqrt(len(g)) if len(g) > 1 else np.nan
-        rows.append({"market": market, "bets": len(g), "W-L-P": f"{w}-{l}-{p}",
-                     "win%": win, "flat ROI": g["flat"].mean(),
-                     "flat ROI 95%": f"{g['flat'].mean() - 1.96 * se_roi:+.1%} to {g['flat'].mean() + 1.96 * se_roi:+.1%}",
-                     "qtr-Kelly units": g["kelly_units"].sum(),
-                     "qtr-Kelly ROI": g["kelly_units"].sum() / g["kelly_stake"].sum() if g["kelly_stake"].sum() else np.nan})
+        roi, lo, hi = metrics.cluster_bootstrap(g, "game_id", "flat", n=n_boot)
+        k_roi = g["kelly_units"].sum() / g["kelly_stake"].sum() if g["kelly_stake"].sum() else np.nan
+        rows.append({"market": market, "bets": len(g), "games": g["game_id"].nunique(), "W-L-P": f"{w}-{l}-{p}",
+                     "flat ROI": roi, "flat ROI 95% (game-clustered)": f"{lo:+.1%} to {hi:+.1%}",
+                     "flat units": g["flat"].sum(), "flat max drawdown": metrics.max_drawdown(g["flat"]),
+                     "qtr-Kelly ROI": k_roi, "qtr-Kelly max drawdown": metrics.max_drawdown(g["kelly_units"])})
     return pd.DataFrame(rows)
+
+
+def bet_seasons(bets: pd.DataFrame) -> pd.DataFrame:
+    b = bets[bets["decision"] != "NO BET"]
+    return (b.groupby("season").agg(bets=("flat", "size"), flat_units=("flat", "sum"), flat_roi=("flat", "mean"))
+             .reset_index())
 
 
 def mae_table(p: pd.DataFrame) -> pd.DataFrame:
@@ -180,4 +248,5 @@ def to_markdown(df: pd.DataFrame, fmt: dict | None = None) -> str:
     return "\n".join(out)
 
 
-__all__ = ["run", "prob_table", "calibration", "bet_table", "mae_table", "to_markdown", "FEATURES"]
+__all__ = ["run", "prob_table", "season_diffs", "calibration", "bet_table", "bet_seasons", "mae_table",
+           "to_markdown", "FEATURES"]

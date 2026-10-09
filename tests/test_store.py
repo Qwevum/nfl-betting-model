@@ -141,8 +141,8 @@ class Metrics(unittest.TestCase):
         outcome = rng.choice([-1.0, 1.0], 300)
         iid = pd.DataFrame({"g": np.arange(300), "x": outcome})
         dup = pd.DataFrame({"g": np.repeat(np.arange(300), 3), "x": np.repeat(outcome, 3)})  # 3 identical bets/game
-        _, lo1, hi1 = metrics.cluster_bootstrap(iid, "g", lambda d: d["x"].mean(), n=400)
-        _, lo2, hi2 = metrics.cluster_bootstrap(dup, "g", lambda d: d["x"].mean(), n=400)
+        _, lo1, hi1 = metrics.cluster_bootstrap(iid, "g", "x", n=2000)
+        _, lo2, hi2 = metrics.cluster_bootstrap(dup, "g", "x", n=2000)
         naive_se = dup["x"].std() / np.sqrt(len(dup))
         self.assertGreater(hi2 - lo2, 1.5 * 2 * 1.96 * naive_se)     # clustering widens vs naive iid
         self.assertAlmostEqual(hi2 - lo2, hi1 - lo1, delta=0.05)

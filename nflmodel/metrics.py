@@ -20,21 +20,20 @@ def max_drawdown(profits) -> float:
     return float(np.max(peak - c)) if len(c) else 0.0
 
 
-def cluster_bootstrap(df: pd.DataFrame, cluster: str, stat, n: int = 2000, seed: int = 0,
+def cluster_bootstrap(df: pd.DataFrame, cluster: str, col: str, n: int = 2000, seed: int = 0,
                       alpha: float = 0.05) -> tuple[float, float, float]:
-    """(estimate, lo, hi) resampling whole clusters (games), so correlated bets on the
-    same game (spread + moneyline + total) are not treated as independent."""
+    """(mean of `col`, lo, hi), resampling whole clusters (games) with replacement, so
+    correlated bets on the same game (spread + moneyline + total) are not treated as
+    independent. The resampled statistic is sum(values) / count over the drawn games."""
     if df.empty:
         return np.nan, np.nan, np.nan
-    est = float(stat(df))
-    groups = [g for _, g in df.groupby(cluster)]
-    k = len(groups)
+    g = df.groupby(cluster)[col].agg(["sum", "count"])
+    sums, counts = g["sum"].to_numpy(float), g["count"].to_numpy(float)
+    est = float(sums.sum() / counts.sum())
     rng = np.random.default_rng(seed)
-    sims = []
-    for _ in range(n):
-        idx = rng.integers(0, k, k)
-        sims.append(stat(pd.concat([groups[i] for i in idx], ignore_index=True)))
-    lo, hi = np.nanquantile(sims, [alpha / 2, 1 - alpha / 2])
+    idx = rng.integers(0, len(g), size=(n, len(g)))
+    sims = sums[idx].sum(axis=1) / counts[idx].sum(axis=1)
+    lo, hi = np.quantile(sims, [alpha / 2, 1 - alpha / 2])
     return est, float(lo), float(hi)
 
 

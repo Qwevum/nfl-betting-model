@@ -8,6 +8,7 @@
   python run.py grade                                forecasts, recommendations and wagers, graded separately
   python run.py place --forecast ID --stake U        record a wager you actually placed
   python run.py verify-log                           check the hash chains of history and ledger
+  python run.py collect [--days 7]                   snapshot odds + injuries for upcoming games (no model)
 """
 from __future__ import annotations
 
@@ -303,50 +304,95 @@ def cmd_validate(args):
     _, feat, _, _, _ = build(refresh=not args.no_refresh)
     last = int(feat.loc[feat["result"].notna(), "season"].max())
     seasons = list(range(args.start, last + 1))
+    settings = load_settings(min_edge=args.min_edge)
+    min_edge = settings.min_edge
     print(f"Validating {seasons[0]}-{seasons[-1]} (each season predicted by a model fit on earlier ones) ...")
-    min_edge = load_settings(min_edge=args.min_edge).min_edge
     preds, bets = validate.run(feat, seasons, min_edge)
+    print("Replay at standard retail juice (4.76% overround, as -110/-110) ...")
+    _, bets_retail = validate.run(feat, seasons, min_edge, bet_overround=0.0476)
     print("Ablation: same model without the QB-change feature ...")
     no_qb = [f for f in validate.FEATURES if f != "f_qb"]
     preds_nq, _ = validate.run(feat, seasons, min_edge, features=no_qb, with_bets=False)
 
     probs = validate.prob_table(preds)
-    probs_nq = validate.prob_table(preds_nq).query("predictor == 'model'").assign(predictor="model without QB feature")
-    probs = pd.concat([probs, probs_nq]).sort_values(["target", "brier"]).reset_index(drop=True)
+    # ablation scored on exactly the same rows as the full model
+    abl = preds.drop(columns=["p_model", "p_cover", "p_over"]).merge(
+        preds_nq[["game_id", "p_model", "p_cover", "p_over"]], on="game_id")
+    probs_nq = validate.prob_table(abl, n_boot=200)
+    probs_nq = probs_nq[probs_nq["predictor"] == "model"].assign(predictor="model without QB feature")
+    probs = pd.concat([probs, probs_nq]).sort_values(["target", "predictor"]).reset_index(drop=True)
+    seas = validate.season_diffs(preds)
     cal = validate.calibration(preds)
     mae = validate.mae_table(preds)
     mae_nq = validate.mae_table(preds_nq)[["season", "MAE model own line"]].rename(
         columns={"MAE model own line": "MAE own line w/o QB"})
     mae = mae.merge(mae_nq, on="season")
     bt = validate.bet_table(bets)
+    bs = validate.bet_seasons(bets).merge(validate.overround_by_season(feat), on="season", how="right").fillna(
+        {"bets": 0, "flat_units": 0.0})
+    bt_r = validate.bet_table(bets_retail)
+    bs_r = validate.bet_seasons(bets_retail).rename(columns={"bets": "bets @4.76%", "flat_units": "units @4.76%",
+                                                             "flat_roi": "roi @4.76%"})
+    bs = bs.merge(bs_r, on="season", how="left")
+    bs = bs[bs["season"] >= seasons[0]]
 
-    print("\nProbability quality (lower Brier / log loss is better):")
-    print(probs.round(4).to_string(index=False))
-    print("\nCalibration of model win probabilities:")
+    pd.set_option("display.max_colwidth", 40)
+    print("\nProbability quality on identical rows (lower is better; ECE = calibration error):")
+    print(probs.round(5).to_string(index=False))
+    print("\nModel minus market Brier by season (negative = model better):")
+    print(seas.round(5).to_string(index=False))
+    print("\nCalibration of win probabilities (same games):")
     print(cal.round(3).to_string(index=False))
     print("\nMargin error by season (points):")
     print(mae.round(2).to_string(index=False))
-    print(f"\nBetting vs closing lines, decision rules as live (EV > {min_edge:.0%}, robust to 0.5 pt, "
-          "no 4+ pt gaps), one side per market:")
-    print(bt.to_string(index=False))
+    print(f"\nHistorical replay at CLOSING consensus prices (EV > {min_edge:.0%}, robust to 0.5 pt, 4-pt gap rule;"
+          " live-only rules NOT applied), one side per market:")
+    print(bt.round(4).to_string(index=False))
+    print("\nSame rules, every bet priced at standard retail juice (4.76% overround):")
+    print(bt_r.round(4).to_string(index=False))
+    print("\nBy season, with the median overround of the recorded consensus prices:")
+    print(bs.round(4).to_string(index=False))
 
+    fmt_b = {"flat ROI": "{:+.1%}", "flat units": "{:+.1f}", "flat max drawdown": "{:.1f}",
+             "qtr-Kelly ROI": "{:+.1%}", "qtr-Kelly max drawdown": "{:.1f}"}
     md = [f"# Validation {seasons[0]}-{seasons[-1]}", "", validate.__doc__.strip(), "",
-          "## Probability quality", "", validate.to_markdown(probs), "",
-          "## Calibration (model win probability)", "", validate.to_markdown(cal.astype({"bin": str})), "",
+          "## Probability quality (identical rows for every predictor)", "",
+          "`model minus market (Brier)`: negative means the model beat the closing market; the CI resamples "
+          "whole games.", "", validate.to_markdown(probs), "",
+          "## Model minus market Brier, by season", "", validate.to_markdown(seas), "",
+          "## Calibration of win probabilities", "", validate.to_markdown(cal), "",
           "## Margin error by season", "", validate.to_markdown(mae), "",
-          f"## Betting results (staking: flat 1u, and quarter Kelly capped at {decide.MAX_STAKE_UNITS:g}u)", "",
-          validate.to_markdown(bt, {"win%": "{:.1%}", "flat ROI": "{:+.1%}", "qtr-Kelly units": "{:+.1f}",
-                                    "qtr-Kelly ROI": "{:+.1%}"})]
+          f"## Historical replay at closing consensus prices (staking: flat 1u, and quarter Kelly capped at "
+          f"{settings.max_stake_units:g}u)", "",
+          "Rules applied: EV above the threshold, robustness to a 0.5-pt error, 4-pt gap. Not applied: quote "
+          "freshness, multi-book reference, starter availability, weather. CIs resample whole games, so a "
+          "spread, moneyline and total on the same game are not treated as independent.", "",
+          validate.to_markdown(bt, fmt_b), "",
+          "### Same rules at standard retail juice (4.76% overround)", "",
+          "The recorded consensus prices carry about 2.4% overround through 2022 and about 4.7% from 2023 "
+          "(see the season table). Most bettors pay the latter. Here every consensus pair is re-priced "
+          "proportionally at 4.76% (the -110/-110 margin), keeping its no-vig probabilities, and the decision "
+          "rules are re-applied at those prices.", "",
+          validate.to_markdown(bt_r, fmt_b), "", "### By season", "",
+          validate.to_markdown(bs, {"flat_units": "{:+.1f}", "flat_roi": "{:+.1%}", "units @4.76%": "{:+.1f}",
+                                    "roi @4.76%": "{:+.1%}", "spread_or": "{:.2%}", "ml_or": "{:.2%}",
+                                    "total_or": "{:.2%}"})]
     out = ROOT / "reports" / "validation.md"
     out.parent.mkdir(exist_ok=True)
     out.write_text("\n".join(md) + "\n")
-    w = probs[(probs["target"] == "winner")].set_index("predictor")
+    w = probs[probs["target"] == "winner"].set_index("predictor")
     allb = bt[bt["market"] == "all"].iloc[0]
-    summary = (f"Validation {seasons[0]}-{seasons[-1]} ({int(w.loc['model', 'n'])} games, out of sample): "
-               f"winner Brier model {w.loc['model', 'brier']:.4f} vs closing market "
-               f"{w.loc['market no-vig (closing)', 'brier']:.4f} (lower is better). Bets under the live rules: "
-               f"{allb['bets']} ({allb['W-L-P']}), flat ROI {allb['flat ROI']:+.1%} "
-               f"(95% range {allb['flat ROI 95%']}). Full tables: reports/validation.md")
+    retail = bt_r[bt_r["market"] == "all"].iloc[0] if len(bt_r) and (bt_r["market"] == "all").any() else \
+        {"bets": 0, "flat ROI": float("nan"), "flat ROI 95% (game-clustered)": "n/a"}
+    summary = (f"Validation {seasons[0]}-{seasons[-1]} (out of sample, closing information set, "
+               f"{int(w.loc['model', 'n'])} games scored identically): winner Brier model "
+               f"{w.loc['model', 'brier']:.4f} vs closing market {w.loc['market no-vig (closing)', 'brier']:.4f}, "
+               f"difference {w.loc['model minus market (Brier)', 'brier']:+.5f} "
+               f"(95% CI {w.loc['model minus market (Brier)', 'ci95']}). Historical replay at closing consensus "
+               f"prices (live-only rules not applied): {allb['bets']} bets on {allb['games']} games, flat ROI "
+               f"{allb['flat ROI']:+.1%} ({allb['flat ROI 95% (game-clustered)']}, game-clustered), max drawdown "
+               f"{allb['flat max drawdown']:.1f}u; at standard 4.76% juice: {retail['bets']} bets, flat ROI "
+               f"{retail['flat ROI']:+.1%} ({retail['flat ROI 95% (game-clustered)']}). Full tables: reports/validation.md")
     (ROOT / "reports" / "validation_summary.md").write_text(summary + "\n")
     print(f"\n{summary}")
 
@@ -355,6 +401,44 @@ def cmd_ratings(args):
     _, _, table_, _, _ = build(refresh=not args.no_refresh)
     print("points_rating = points better than an average team on a neutral field\n")
     print(table_.round(3).to_string(index=False))
+
+
+def cmd_collect(args):
+    """Snapshot market and injury data for upcoming games, without the model.
+
+    Run it on a schedule (e.g. hourly, and around kickoff - 60 minutes) to build the
+    timestamped history that horizon-matched evaluation needs. Nothing is backfilled."""
+    settings = load_settings(max_odds_age_minutes=args.max_odds_age)
+    now = now_utc()
+    games = load_games(refresh=not args.no_refresh)
+    games = games.assign(kickoff_utc=[_kick(d, t) for d, t in zip(games["gameday"], games["gametime"])])
+    window = games[(games["kickoff_utc"] > now) & (games["kickoff_utc"] <= now + pd.Timedelta(days=args.days))]
+    if window.empty:
+        raise SystemExit(f"No games kicking off in the next {args.days} days.")
+    kick = inputs.kickoff_map(window)
+    books, consensus, notes = gather_offers(window, kick, settings)
+    valid, rejected = validate_offers(books, kick, now, settings)
+    season = int(window["season"].iloc[0])
+    inj = load_injuries(season, refresh=not args.no_refresh)
+    save_sources()
+    run_utc = fmt(now)
+    run_id = "collect_" + run_utc.replace(":", "").replace("-", "")
+    sid, d = store.save_snapshot(
+        run_id,
+        files={"sources.json": ROOT / "data" / "sources.json", "injuries.parquet": ROOT / "data" / f"injuries_{season}.parquet",
+               "odds_manual.csv": ROOT / "odds_manual.csv"},
+        frames={"schedule_rows.csv": window, "offers_raw.csv": books, "offers_valid.csv": valid,
+                "offers_rejected.csv": rejected, "consensus.csv": consensus},
+        meta={"run_utc": run_utc, "settings": vars(settings), "notes": notes})
+    store.append(store.COLLECTIONS, "collection", [{
+        "run_id": run_id, "snapshot_id": sid, "run_utc": run_utc, "games": int(len(window)),
+        "valid_quotes": int(len(valid)), "rejected_quotes": int(len(rejected)),
+        "books": int(valid["book"].nunique()) if len(valid) else 0, "injury_rows": int(len(inj))}],
+        recorded_utc=run_utc)
+    for n in notes:
+        print(f"  ! {n}")
+    print(f"Collected {len(window)} games, {len(valid)} valid / {len(rejected)} rejected quotes, "
+          f"{len(inj)} injury rows -> {d.relative_to(ROOT)}")
 
 
 def cmd_templates(args):
@@ -398,7 +482,7 @@ def cmd_void(args):
 
 def cmd_verify_log(args):
     bad = False
-    for path in (store.FORECASTS, store.LEDGER):
+    for path in (store.FORECASTS, store.LEDGER, store.COLLECTIONS):
         ok, msg = store.verify(path)
         bad |= not ok
         print(f"{path.relative_to(ROOT)}: {'OK' if ok else 'FAILED'} - {msg}")
@@ -427,6 +511,8 @@ def main():
     vo = sub.add_parser("void", help="void a recorded wager (e.g. cancelled by the book)")
     vo.add_argument("--bet-id", required=True); vo.add_argument("--reason", required=True)
     sub.add_parser("verify-log", help="check the forecast history and ledger hash chains")
+    co = sub.add_parser("collect", help="snapshot odds + injury data for upcoming games (no model)")
+    co.add_argument("--days", type=float, default=7, help="games kicking off within this many days")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
     t.add_argument("--week", type=int); t.add_argument("--season", type=int)
     for s in sub.choices.values():
@@ -439,7 +525,8 @@ def main():
     args = ap.parse_args()
     {"predict": cmd_predict, "recommend": cmd_recommend, "validate": cmd_validate,
      "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates,
-     "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log}[args.cmd](args)
+     "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log,
+     "collect": cmd_collect}[args.cmd](args)
 
 
 if __name__ == "__main__":

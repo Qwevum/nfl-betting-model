@@ -140,32 +140,50 @@ Stakes are a quarter of Kelly, capped at 2 units (1u = 1% of bankroll).
 
 ## Validation (`python run.py validate`, full tables in `reports/validation.md`)
 
-Walk-forward: each season is predicted by a model fit and calibrated only on
-earlier seasons. Latest run, 2015 to week 4 of 2026, 3,082 games:
+**What is validated, and what isn't:**
+* Each season is predicted by a model whose ratings, regressions and
+  calibration use only earlier seasons.
+* Live forecasts target **kickoff − 60 minutes** (`horizon_minutes`), but the
+  only historical market prices available are nflverse **closing** consensus
+  lines, which come later than that.
+* So model and market are compared at the closing information set, on exactly
+  the same games. That is the market's best case.
+* Observed weather is not used. Injury reports are not used historically,
+  because the feed has no publish times.
+* Starters are the actual starters. Inactives are normally public by the
+  horizon.
+* Nothing is backfilled: `python run.py collect` and every recorded `predict`
+  snapshot the inputs available at the time, building horizon-matched history
+  from now on.
 
-| target | model | closing market (no-vig) | baseline |
+Latest run, 2015 to week 5 of 2026, 3,082 games scored identically:
+
+| target | model Brier | closing market | model − market (95% CI, game bootstrap) |
 |---|---|---|---|
-| winner (Brier) | 0.2126 | 0.2126 | ratings only 0.2189, home rate 0.2479 |
-| home covers (Brier) | 0.2502 | 0.2500 | coin flip 0.2500 |
-| over hits (Brier) | 0.2502 | 0.2500 | coin flip 0.2500 |
+| winner | 0.21283 | 0.21271 | +0.00012 (−0.00051 to +0.00068) |
+| home covers | 0.25016 | 0.24990 | +0.00026 (−0.00064 to +0.00118) |
+| over hits | 0.25029 | 0.24996 | +0.00034 (−0.00047 to +0.00111) |
 
-Bets under the live rules against closing consensus prices: 1,333 bets,
-646-663-24, flat-stake ROI **+2.3% (95% range −3.5% to +8.0%)**: spreads +3.4%,
-moneylines +10.7% (on only 219 bets, range −7.5% to +28.8%), totals −3.5%.
-Quarter-Kelly staking returned +1.4% on the amount staked.
+The model is **not** better than the closing market on any target, and
+season-by-season differences go both ways. The QB feature lowers the model's
+own-line error in 9 of 12 seasons; its effect on final probabilities is within
+noise. Calibration error (ECE) is 0.017 for the model vs 0.016 for the market.
 
-**What this means:** the model is about as accurate as the closing line, not
-better. No result above is statistically significant. The realistic edge is
-**line shopping**: betting a number better than the market consensus. That is
-why consensus prices alone almost never produce a bet. The QB feature lowered
-the model's own-line error in 9 of 12 seasons, and its contribution to final
-probabilities is small.
+**Historical betting replay.** The replay places one side per market at the
+closing consensus price. It applies only the EV, 0.5-point robustness and gap
+rules. It cannot apply the live-only rules (quote freshness, the multi-book
+reference, starter availability, weather), so these are not live results.
 
-**Information timing:** historical predictions use closing lines (available
-before kickoff) and actual starting QBs (normally known about 90 minutes before
-kickoff). Historical weather is the observed value, not a forecast. Model design
-choices were made after seeing 2015–2025 results, so the only pristine holdout is
-the prediction log from now on.
+| prices | bets (games) | flat ROI | 95% CI (game-clustered) | max drawdown |
+|---|---|---|---|---|
+| recorded consensus | 1,264 (1,008) | +3.0% | −3.1% to +8.9% | 30.5u |
+| standard retail juice (4.76%) | 537 (486) | +1.4% | −7.6% to +10.7% | 27.6u |
+
+**Caution: the price source changed in 2023.** The recorded consensus prices
+carry about **2.4% overround through 2022 and about 4.7% from 2023**. All
+replay bets except one fall in 2015–2022, so the positive ROI comes from
+reduced-juice prices most bettors can't get. At standard juice it is
+indistinguishable from zero.
 
 ## Forecast history, snapshots and the bet ledger
 
