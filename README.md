@@ -53,7 +53,8 @@ example a rescheduled game), are rejected and listed in the output.
 | `odds_manual.csv` | quotes from your sportsbook apps, with `odds_time_utc` (ISO-8601 UTC) |
 | `qb_overrides.csv` | a starting QB you have confirmed for one game, with `confirmed_utc` |
 | `weather_manual.csv` | wind/temperature forecast with `forecast_utc`; required to bet an outdoor total |
-| `ODDS_API_KEY` env var | every US book from the-odds-api.com with per-book update times; `python run.py check-live` verifies it |
+| `.env` file or `ODDS_API_KEY` env var | your the-odds-api.com key: every US book with per-book update times. Put `ODDS_API_KEY=...` in `.env` (gitignored, never commit it); `python run.py check-live` verifies it and prints remaining credits |
+| `odds_api_regions` setting | regions per request (default `us`). Each request costs 3 credits per region (h2h, spreads, totals), so one `predict` or `check-live` costs 3 credits on the default |
 | `settings.toml` | overrides for `nflmodel/config.py`, e.g. `max_odds_age_minutes = 20` |
 
 Bookmaker quotes are validated **before** the best price is chosen. A quote is

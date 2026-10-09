@@ -43,6 +43,9 @@ class Settings:
     gap_points: float = 4.0                # model-vs-market gap (pts) that blocks a bet as unexplained
     kelly_fraction: float = 0.25           # share of full Kelly staked
     max_stake_units: float = 2.0           # stake cap per bet (1 unit = 1% of bankroll)
+    # The Odds API: bookmaker regions per request. Cost = 3 markets x number of regions
+    # credits per request, so "us" (3 credits) suits the free plan; "us,us2" adds books.
+    odds_api_regions: str = "us"
 
     def __post_init__(self):
         validate_settings(self)
@@ -50,6 +53,8 @@ class Settings:
     def describe(self) -> str:
         return ", ".join(f"{k}={v:g}" if isinstance(v, float) else f"{k}={v}" for k, v in asdict(self).items())
 
+
+ODDS_API_REGIONS = {"us", "us2", "us_dfs", "us_ex", "uk", "eu", "au"}
 
 # (name, kind, lower, lower_inclusive, upper, upper_inclusive)
 _RULES = [
@@ -85,6 +90,10 @@ def validate_settings(s: Settings) -> None:
         if (v < lo) or (v == lo and not lo_inc) or (v > hi) or (v == hi and not hi_inc):
             rng = f"{'[' if lo_inc else '('}{lo}, {hi}{']' if hi_inc else ')'}"
             errors.append(f"{name}={v!r} outside {rng}")
+    regions = s.odds_api_regions.split(",") if isinstance(s.odds_api_regions, str) else None
+    if not regions or any(r.strip() not in ODDS_API_REGIONS for r in regions):
+        errors.append(f"odds_api_regions must be a comma-separated subset of {sorted(ODDS_API_REGIONS)}, "
+                      f"got {s.odds_api_regions!r}")
     if not errors and s.clock_skew_minutes >= s.max_odds_age_minutes:
         errors.append("clock_skew_minutes must be smaller than max_odds_age_minutes")
     if errors:

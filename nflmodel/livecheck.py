@@ -5,42 +5,49 @@ feed. Writes nothing: it is a diagnostic, not a collection run.
 """
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pandas as pd
 
+from . import apikey
 from .market import book_pairs
 from .timeutil import fmt
 
 SETUP = """How to enable the live bookmaker feed:
-  1. Create an account at https://the-odds-api.com and check its current plans and
-     credit costs (each request is charged per market and region; this tool requests
-     h2h, spreads and totals for the us and us2 regions in one call).
-  2. Export the key in the shell that runs the model, without committing it anywhere:
-         export ODDS_API_KEY=...        # macOS/Linux
-         setx ODDS_API_KEY ...          # Windows (new terminal afterwards)
-  3. Run:  python run.py check-live
+  1. Get a key at https://the-odds-api.com (the free plan has a monthly credit
+     allowance; each request costs one credit per market per region, so the default
+     request -- h2h, spreads and totals for region "us" -- costs 3 credits).
+  2. Give the key to the model WITHOUT committing it, either:
+       a) a file named .env in the repo root (already gitignored) containing
+              ODDS_API_KEY=your_key_here
+       b) or an environment variable in the shell that runs the model:
+              export ODDS_API_KEY=...        # macOS/Linux
+              setx ODDS_API_KEY ...          # Windows (new terminal afterwards)
+  3. Run:  python run.py check-live      (spends one request's credits)
   Without a key, odds come only from odds_manual.csv (your own app quotes) and the
   untimed nflverse consensus, which is never treated as executable."""
 
 
 def key_status() -> tuple[bool, str]:
     """(configured, description) without revealing the value."""
-    v = os.environ.get("ODDS_API_KEY")
-    if v is None:
-        return False, "ODDS_API_KEY is not set"
-    if not v.strip():
-        return False, "ODDS_API_KEY is set but empty"
-    return True, "ODDS_API_KEY is set (value not shown)"
+    key, source = apikey.lookup()
+    if source == "not set":
+        return False, "ODDS_API_KEY is not set (no environment variable, no .env file entry)"
+    if not key:
+        return False, f"ODDS_API_KEY is empty ({source})"
+    return True, f"ODDS_API_KEY is set via {source} (value not shown)"
 
 
-def redact(text: str) -> str:
-    v = os.environ.get("ODDS_API_KEY")
-    text = str(text)
-    if v and v.strip():
-        text = text.replace(v, "***")
-    return text
+def redact(text) -> str:
+    return apikey.redact(text)
+
+
+def quota_line(sources: dict) -> str | None:
+    """Credit usage reported by The Odds API on the last request, if any."""
+    q = (sources.get("odds_api") or {}).get("quota") or {}
+    if not q:
+        return None
+    parts = [f"{k.removeprefix('x-requests-')} {v}" for k, v in q.items()]
+    return "The Odds API credits: " + ", ".join(parts)
 
 
 def summarize(valid: pd.DataFrame, rejected: pd.DataFrame, kickoffs: dict, collected: pd.Timestamp,
@@ -95,4 +102,4 @@ def describe_failure(exc: Exception) -> str:
     return f"request failed: {msg}"
 
 
-__all__ = ["SETUP", "key_status", "redact", "summarize", "format_summary", "describe_failure", "np"]
+__all__ = ["SETUP", "key_status", "redact", "quota_line", "summarize", "format_summary", "describe_failure", "np"]

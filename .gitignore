@@ -6,3 +6,4 @@ logs/graded_*.csv
 templates/
 reports/dev/
 logs/graded.csv
+.env

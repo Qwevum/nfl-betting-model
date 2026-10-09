@@ -70,6 +70,10 @@ def _fetch(url: str, label: str | None = None) -> bytes:
             SOURCES[label] = {"url": url.split("apiKey=")[0] + ("apiKey=***" if "apiKey=" in url else ""),
                               "retrieved_utc": utcnow(),
                               "last_modified": resp.headers.get("Last-Modified")}
+            quota = {h: resp.headers.get(h) for h in ("x-requests-used", "x-requests-remaining", "x-requests-last")
+                     if resp.headers.get(h) is not None}
+            if quota:   # The Odds API credit usage (no secrets in these headers)
+                SOURCES[label]["quota"] = quota
         return body
 
 

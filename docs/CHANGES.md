@@ -859,3 +859,24 @@ The suite passes: 118 tests.
   that don't qualify (TB @ DAL, legacy timestamps), 64 with no forecast
   recorded.
 * 28 have windows not yet closed.
+
+## 19. The Odds API key from a local `.env` file, and credit-aware requests
+
+* The key is read from the `ODDS_API_KEY` environment variable, or else from
+  `ODDS_API_KEY=...` in `.env` at the repo root (`nflmodel/apikey.py`). `.env`
+  is gitignored, so the key is never committed. Output, reports, snapshots and
+  error messages redact the key.
+* `check-live` says where the key came from (environment variable or `.env`
+  file), never the value.
+* New setting `odds_api_regions` (default `us`; validated). The Odds API charges
+  1 credit per market per region, so one request costs 3 credits on the default
+  (`us,us2` used to cost 6). That suits the free plan's monthly allowance.
+* The API's credit headers (`x-requests-used`, `x-requests-remaining`,
+  `x-requests-last`) are kept with the source record (and so in the run
+  snapshot), printed by `predict` and `check-live`.
+* Each `predict` or `check-live` makes exactly one odds request; nothing is
+  scheduled or repeated.
+
+**Verification:** new tests for key lookup order, `.env` parsing, redaction,
+the regions setting and the request URL. The key was not used from the
+development sandbox: its network policy blocks `api.the-odds-api.com`.

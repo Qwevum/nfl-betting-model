@@ -17,12 +17,12 @@ Bookmaker offers pass validate_offers() before anything else looks at them.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from . import apikey
 from .data import SOURCES, _fetch, utcnow
 from .timeutil import fmt, parse_utc
 
@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 ODDS_API_URL = (
     "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds"
-    "?apiKey={key}&regions=us,us2&markets=h2h,spreads,totals&oddsFormat=american"
+    "?apiKey={key}&regions={regions}&markets=h2h,spreads,totals&oddsFormat=american&dateFormat=iso"
 )
 
 FULL_NAMES = {
@@ -144,8 +144,10 @@ def odds_api_offers(events: list, games: pd.DataFrame, kickoffs: dict,
     return pd.DataFrame(rows, columns=OFFER_COLS)
 
 
-def fetch_odds_api(games: pd.DataFrame, kickoffs: dict, key: str) -> pd.DataFrame:
-    events = json.loads(_fetch(ODDS_API_URL.format(key=key), "odds_api"))
+def fetch_odds_api(games: pd.DataFrame, kickoffs: dict, key: str, regions: str = "us") -> pd.DataFrame:
+    """One request for every upcoming NFL game. Costs 3 credits per region."""
+    regions = ",".join(r.strip() for r in regions.split(","))
+    events = json.loads(_fetch(ODDS_API_URL.format(key=key, regions=regions), "odds_api"))
     return odds_api_offers(events, games, kickoffs)
 
 
@@ -253,14 +255,18 @@ def _valid_point(market: str, point) -> bool:
 def gather_offers(week_games: pd.DataFrame, kickoffs: dict, settings) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """(timestamped bookmaker offers, consensus offers, notes). Not yet validated."""
     notes, frames = [], []
-    key = os.environ.get("ODDS_API_KEY")
+    key = apikey.get()
     if key:
         try:
-            api = fetch_odds_api(week_games, kickoffs, key)
-            notes.append(f"The Odds API: {len(api)} offers from {api['book'].nunique()} books")
+            api = fetch_odds_api(week_games, kickoffs, key, settings.odds_api_regions)
+            notes.append(f"The Odds API ({settings.odds_api_regions}): {len(api)} offers from "
+                         f"{api['book'].nunique()} books")
+            from .livecheck import quota_line
+            if quota_line(SOURCES):
+                notes.append(quota_line(SOURCES))
             frames.append(api)
         except Exception as exc:
-            from .livecheck import redact
+            from .apikey import redact
             notes.append(f"The Odds API failed: {redact(exc)}")
             SOURCES["odds_api"] = {"url": "api.the-odds-api.com", "retrieved_utc": utcnow(), "error": redact(exc)}
     else:

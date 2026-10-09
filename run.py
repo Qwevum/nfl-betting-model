@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
@@ -525,7 +524,7 @@ def cmd_experiment(args):
 
 def cmd_check_live(args):
     """Diagnose the live bookmaker feed. Prints statistics only; writes nothing."""
-    from nflmodel import livecheck
+    from nflmodel import apikey, livecheck
     from nflmodel.odds import fetch_odds_api
     settings = load_settings(max_odds_age_minutes=args.max_odds_age)
     ok, desc = livecheck.key_status()
@@ -544,9 +543,11 @@ def cmd_check_live(args):
     if window.empty:
         raise SystemExit(f"No games kicking off in the next {args.days} days to check against.")
     kick = inputs.kickoff_map(window)
-    print(f"Requesting odds once for {len(window)} games in the next {args.days:g} days ...")
+    regions = settings.odds_api_regions
+    print(f"Requesting odds once for {len(window)} games in the next {args.days:g} days "
+          f"(regions {regions}: {3 * len(regions.split(','))} credits) ...")
     try:
-        books = fetch_odds_api(window, kick, os.environ["ODDS_API_KEY"])
+        books = fetch_odds_api(window, kick, apikey.get(), regions)
     except Exception as exc:  # noqa: BLE001 - report any transport/API failure without the key
         print(f"\nLive feed: FAILED. {livecheck.describe_failure(exc)}")
         return
@@ -555,6 +556,8 @@ def cmd_check_live(args):
     summary = livecheck.summarize(valid, rejected, kick, collected, settings.min_reference_books)
     print("\nLive feed: " + ("WORKING" if summary["valid_quotes"] else "REACHABLE BUT NO VALID QUOTES"))
     print(livecheck.format_summary(summary, settings.min_reference_books))
+    if livecheck.quota_line(SOURCES):
+        print(livecheck.quota_line(SOURCES))
 
 
 def cmd_templates(args):
