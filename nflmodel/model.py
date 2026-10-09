@@ -323,6 +323,18 @@ class FittedModel:
         return float(sigmoid(cal[0] + cal[1] * logit(p_market) + cal[2] * edge * edge_mult))
 
 
+def inner_oos(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3,
+              features: list[str] | None = None, total_features: list[str] | None = None) -> pd.DataFrame:
+    """The inner walk-forward: each training season after the first `inner_start` predicted by
+    core models fit only on the seasons before it. Calibration is fit on these rows."""
+    seasons = sorted(train["season"].unique())
+    oos = []
+    for s in seasons[inner_start:]:
+        inner = _fit_core(train[train["season"] < s], lam, features, total_features)
+        oos.append(inner.raw(train[train["season"] == s]))
+    return pd.concat(oos, ignore_index=True)
+
+
 def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3,
         features: list[str] | None = None, total_features: list[str] | None = None,
         weights: np.ndarray | pd.Series | None = None) -> FittedModel:
@@ -344,12 +356,7 @@ def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3,
             raise ValueError("weights must be finite, non-negative, one per training row")
         train = train.assign(**{WEIGHT: wv / wv.mean()})
     core = _fit_core(train, lam, features, total_features)
-    seasons = sorted(train["season"].unique())
-    oos = []
-    for s in seasons[inner_start:]:
-        inner = _fit_core(train[train["season"] < s], lam, features, total_features)
-        oos.append(inner.raw(train[train["season"] == s]))
-    oos = pd.concat(oos, ignore_index=True)
+    oos = inner_oos(train, lam, inner_start, features, total_features)
 
     m = oos.dropna(subset=["blend_margin", "result"])
     k_spread = _shrink((m["blend_margin"] - m["spread_line"]).to_numpy(),
