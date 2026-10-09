@@ -16,6 +16,7 @@ python -m unittest discover tests     # 58 regression tests
 ## Weekly workflow
 
 ```bash
+python run.py check-live              # is the live odds feed configured and usable? (writes nothing)
 python run.py collect                 # snapshot quotes + injury reports (run on a schedule)
 python run.py predict                 # report for the upcoming week; records every forecast
 python run.py recommend               # compact table for the next game day
@@ -51,7 +52,7 @@ example a rescheduled game), are rejected and listed in the output.
 | `odds_manual.csv` | quotes from your sportsbook apps, with `odds_time_utc` (ISO-8601 UTC) |
 | `qb_overrides.csv` | a starting QB you have confirmed for one game, with `confirmed_utc` |
 | `weather_manual.csv` | wind/temperature forecast with `forecast_utc`; required to bet an outdoor total |
-| `ODDS_API_KEY` env var | every US book from the-odds-api.com (free tier) with per-book update times |
+| `ODDS_API_KEY` env var | every US book from the-odds-api.com with per-book update times; `python run.py check-live` verifies it |
 | `settings.toml` | overrides for `nflmodel/config.py`, e.g. `max_odds_age_minutes = 20` |
 
 Bookmaker quotes are validated **before** the best price is chosen. A quote is

@@ -6,7 +6,7 @@ Lines are kept in one long format, one row per offer:
     source ('consensus'|'odds_api'|'manual'|'manual_untimed'), odds_time (book's update time, if known)
 
 Sources:
-  * The Odds API, every US book, if ODDS_API_KEY is set (free tier: the-odds-api.com);
+  * The Odds API (the-odds-api.com), every US book, if ODDS_API_KEY is set;
     quotes carry the book's last_update time.
   * odds_manual.csv: quotes you copy from your own sportsbook apps, keyed by
     game_id + kickoff_utc, with the UTC time you saw them.
@@ -260,8 +260,9 @@ def gather_offers(week_games: pd.DataFrame, kickoffs: dict, settings) -> tuple[p
             notes.append(f"The Odds API: {len(api)} offers from {api['book'].nunique()} books")
             frames.append(api)
         except Exception as exc:
-            notes.append(f"The Odds API failed: {exc}")
-            SOURCES["odds_api"] = {"url": "api.the-odds-api.com", "retrieved_utc": utcnow(), "error": str(exc)}
+            from .livecheck import redact
+            notes.append(f"The Odds API failed: {redact(exc)}")
+            SOURCES["odds_api"] = {"url": "api.the-odds-api.com", "retrieved_utc": utcnow(), "error": redact(exc)}
     else:
         notes.append("ODDS_API_KEY not set: no live bookmaker feed")
     manual = ROOT / "odds_manual.csv"

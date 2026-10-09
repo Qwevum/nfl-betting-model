@@ -640,3 +640,44 @@ the old test asserted the flawed behaviour).
 * `grade` on the real history: 15 games, all excluded ("only legacy
   forecasts"). Previously the TB @ DAL forecasts recorded ~52 hours before
   kickoff were scored.
+
+## 13. Live-collection check
+
+**Problem:** nothing verified whether the live bookmaker feed was configured,
+reachable and sufficient for a market reference. The README also repeated an
+unverified provider plan detail ("free tier").
+
+**Files:** `nflmodel/livecheck.py` (new), `nflmodel/odds.py` (errors redacted),
+`run.py` (`check-live`), `README.md`, `tests/test_livecheck.py` (new).
+
+**Change:** `python run.py check-live`:
+* reports whether `ODDS_API_KEY` is set, never its value
+* without a key, says no quotes were fetched or invented, says consensus lines
+  are not a live feed, and prints setup steps
+* with a key, makes one request and reports:
+  * valid and rejected quotes, with rejection reasons
+  * distinct books
+  * quote age at collection (min, median, max)
+  * games per market with at least `min_reference_books` + 1 two-sided books,
+    so that every offer has a leave-one-book-out reference
+
+  Failures are classified (unreachable, 401 bad key, 429 quota) and any key
+  text is redacted.
+* It writes nothing, creates no recurring job and places nothing. Odds API
+  error notes elsewhere are redacted too.
+
+**Verification:**
+* 4 new tests with a synthetic Odds API fixture (3 fresh books and 1 stale book
+  on one game; 1 book on another):
+  * books, rejections, game counts, quote ages (1–10 min) and
+    reference-readiness (spread 1, ml 1, total 0) are correct
+  * the key never appears in status, redacted or failure text
+  * failure classification is correct
+
+  The suite passes: 101 tests.
+
+**Live status in this environment:**
+* `ODDS_API_KEY` is **not set**, and `check-live` printed setup instructions.
+* With a dummy key it reported "not reachable" (proxy 403). The Odds API host
+  is blocked by this sandbox's network policy, so the live path cannot be
+  exercised here.

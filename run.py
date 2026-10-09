@@ -9,10 +9,12 @@
   python run.py place --forecast ID --stake U        record a wager you actually placed
   python run.py verify-log                           check the hash chains of history and ledger
   python run.py collect [--days 7]                   snapshot odds + injuries for upcoming games (no model)
+  python run.py check-live                           is the live bookmaker feed configured and usable?
 """
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -516,6 +518,40 @@ def cmd_experiment(args):
           f"total {m['total_base']:.3f} -> {m['total_exp']:.3f}")
 
 
+def cmd_check_live(args):
+    """Diagnose the live bookmaker feed. Prints statistics only; writes nothing."""
+    from nflmodel import livecheck
+    from nflmodel.odds import fetch_odds_api
+    settings = load_settings(max_odds_age_minutes=args.max_odds_age)
+    ok, desc = livecheck.key_status()
+    print(desc)
+    if not ok:
+        print("\nLive feed: NOT AVAILABLE. No quotes were fetched or invented; nflverse consensus lines are not a "
+              "live feed.\n")
+        print(livecheck.SETUP)
+        return
+    clock = runtime.Clock()
+    clock.stamp("run_started")
+    games = load_games(refresh=not args.no_refresh)
+    games = games.assign(kickoff_utc=[_kick(d, t) for d, t in zip(games["gameday"], games["gametime"])])
+    now = clock.now()
+    window = games[(games["kickoff_utc"] > now) & (games["kickoff_utc"] <= now + pd.Timedelta(days=args.days))]
+    if window.empty:
+        raise SystemExit(f"No games kicking off in the next {args.days} days to check against.")
+    kick = inputs.kickoff_map(window)
+    print(f"Requesting odds once for {len(window)} games in the next {args.days:g} days ...")
+    try:
+        books = fetch_odds_api(window, kick, os.environ["ODDS_API_KEY"])
+    except Exception as exc:  # noqa: BLE001 - report any transport/API failure without the key
+        print(f"\nLive feed: FAILED. {livecheck.describe_failure(exc)}")
+        return
+    collected = clock.stamp("odds_collected")
+    valid, rejected = validate_offers(books, kick, collected, settings)
+    summary = livecheck.summarize(valid, rejected, kick, collected, settings.min_reference_books)
+    print("\nLive feed: " + ("WORKING" if summary["valid_quotes"] else "REACHABLE BUT NO VALID QUOTES"))
+    print(livecheck.format_summary(summary, settings.min_reference_books))
+
+
 def cmd_templates(args):
     _, feat, _, current, _ = build(refresh=not args.no_refresh)
     season = args.season or current
@@ -590,6 +626,8 @@ def main():
     ex = sub.add_parser("experiment", help="ablate one feature group (docs/EXPERIMENTS.md)")
     ex.add_argument("--group", required=True, choices=["G1", "G2", "G3", "G4"])
     ex.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
+    ck = sub.add_parser("check-live", help="check the live bookmaker feed (never shows the key; writes nothing)")
+    ck.add_argument("--days", type=float, default=7, help="games kicking off within this many days")
     co = sub.add_parser("collect", help="snapshot odds + injury data for upcoming games (no model)")
     co.add_argument("--days", type=float, default=7, help="games kicking off within this many days")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
@@ -605,7 +643,7 @@ def main():
     {"predict": cmd_predict, "recommend": cmd_recommend, "validate": cmd_validate,
      "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates,
      "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log,
-     "collect": cmd_collect, "experiment": cmd_experiment}[args.cmd](args)
+     "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live}[args.cmd](args)
 
 
 if __name__ == "__main__":
