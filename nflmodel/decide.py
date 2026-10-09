@@ -33,14 +33,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from .config import Settings
 from .market import _invert
 from .model import FittedModel, novig_first
 from .odds import ev, implied_probability, kelly
 
-MIN_EDGE = 0.02
-GAP_POINTS = 4.0
-KELLY_FRACTION = 0.25
-MAX_STAKE_UNITS = 2.0
 UNSURE = {"Out", "Doubtful", "Questionable"}
 BOOK_SOURCES_WITH_TIME = {"odds_api", "manual"}
 
@@ -113,7 +110,8 @@ def starter_status(inj: pd.DataFrame, feed_ok: bool, qb_id, team: str, week: int
 
 
 def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: float,
-                  overrides: dict, weather: dict, injury_feed_ok: bool | None = None) -> GameContext:
+                  overrides: dict, weather: dict, settings: Settings,
+                  injury_feed_ok: bool | None = None) -> GameContext:
     """g: one prediction row (namedtuple) for an upcoming game."""
     c = GameContext()
     if injury_feed_ok is None:
@@ -198,12 +196,14 @@ def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: fl
         c.block["total"].append("no weather forecast for an outdoor/unknown-roof game")
 
     gap = abs(g.model_margin - g.spread_line) if pd.notna(g.spread_line) else 0.0
-    if gap >= GAP_POINTS:
-        msg = f"model's own line differs from market by {gap:.1f} pts (unexplained news?)"
+    if gap >= settings.gap_points:
+        msg = (f"model's own line differs from market by {gap:.1f} pts "
+               f"(>= gap_points {settings.gap_points:g}; unexplained news?)")
         c.block["spread"].append(msg); c.block["ml"].append(msg)
     tgap = abs(g.model_total - g.total_line) if pd.notna(g.total_line) else 0.0
-    if tgap >= GAP_POINTS:
-        c.block["total"].append(f"model's own total differs from market by {tgap:.1f} pts")
+    if tgap >= settings.gap_points:
+        c.block["total"].append(f"model's own total differs from market by {tgap:.1f} pts "
+                                f"(>= gap_points {settings.gap_points:g})")
 
     if week <= 4:
         c.risks.append(f"Week {week}: current-season ratings rest on few games")
@@ -323,8 +323,8 @@ def price_for_edge(p_win: float, p_push: float, edge: float) -> float | None:
 
 # ---------------------------------------------------------------- decisions
 
-def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
-                min_edge: float = MIN_EDGE, refs: dict | None = None, min_ref_books: int = 2) -> list[dict]:
+def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext, settings: Settings,
+                refs: dict | None = None) -> list[dict]:
     """One record per market and side, best available price for that side.
 
     refs: {(market, excluded_book): Reference|None} from market.references_for_game.
@@ -333,6 +333,7 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
     """
     rows = []
     pricers: dict = {}
+    min_edge, min_ref_books = settings.min_edge, settings.min_reference_books
 
     def pricer_for(book, plain=False):
         key = (book, plain)
@@ -420,8 +421,7 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
             if ctx.conditions:
                 reasons.append("and only if: " + "; ".join(ctx.conditions))
         rec["reasons"] = " | ".join(reasons)
-        rec["stake_units"] = (round(min(rec["kelly"] * KELLY_FRACTION * 100, MAX_STAKE_UNITS), 2)
-                              if rec["decision"] != "NO BET" else 0.0)
+        rec["stake_units"] = stake_units(rec["kelly"], settings) if rec["decision"] != "NO BET" else 0.0
 
         risks = list(ctx.risks)
         if market == "spread" and (pp > 0.04 or abs(point) in (2.5, 3.5, 6.5, 7.5)):
@@ -435,6 +435,11 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
         rec["risks"] = " | ".join(risks)
         rows.append(rec)
     return rows
+
+
+def stake_units(full_kelly: float, settings: Settings) -> float:
+    """Fractional-Kelly stake in units (1u = 1% of bankroll), capped at max_stake_units."""
+    return round(min(full_kelly * settings.kelly_fraction * 100, settings.max_stake_units), 2)
 
 
 def _fmt_price(p) -> str:

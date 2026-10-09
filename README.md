@@ -125,7 +125,7 @@ travel distance, confirmed inactives, and timestamped book prices unless you sup
 * EV ≤ 0 if the true line is 0.5 pt worse (too sensitive)
 * the projected starting QB is Out, Doubtful or Questionable, did not practice
   with no status issued yet, or is unknown
-* the model's own line is 4+ pts from the market (unexplained)
+* the model's own line is `gap_points` (default 4) or more from the market (unexplained)
 * the bet is a total for an outdoor or unknown-roof game with no forecast
 
 There are three passing tiers:
@@ -140,7 +140,8 @@ There are three passing tiers:
   untimed consensus price or no live reference without that book. The report
   gives the worst price that is still +EV.
 
-Stakes are a quarter of Kelly, capped at 2 units (1u = 1% of bankroll).
+Stakes are `kelly_fraction` × full Kelly (default 0.25), capped at `max_stake_units` (default 2;
+1u = 1% of bankroll). Every report prints the settings it actually used.
 
 ## Validation (`python run.py validate`, full tables in `reports/validation.md`)
 

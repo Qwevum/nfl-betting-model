@@ -123,15 +123,14 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
     rows, contexts = [], {}
     for g in preds.itertuples(index=False):
         if live:
-            ctx = decide.build_context(g, inj, SOURCES, coefs, model.k_spread, overrides, weather)
+            ctx = decide.build_context(g, inj, SOURCES, coefs, model.k_spread, overrides, weather, settings)
         else:  # historical: only the rules that can be applied from data available then
             ctx = decide.GameContext()
             if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= settings.gap_points:
                 ctx.block["spread"].append("model vs market gap"); ctx.block["ml"].append("model vs market gap")
         contexts[g.game_id] = ctx
         refs = refs_by_game.get(g.game_id, {}) if live else None
-        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings.min_edge,
-                                   refs=refs, min_ref_books=settings.min_reference_books)
+        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings, refs=refs)
     rows = pd.DataFrame(rows)
     if len(rows):
         best = decide.best_per_market(rows)
@@ -212,16 +211,18 @@ def cmd_predict(args):
 
     best = rows[rows["is_best_side"]]
     print(f"\n=== {season} Week {week} ===  model {track.model_version()}  |  "
-          f"flag: EV > {settings.min_edge:.0%} and robust to a 0.5-pt error\n")
+          f"flag: EV > {settings.min_edge:.1%} and robust to a 0.5-pt error; stakes "
+          f"{settings.kelly_fraction:g}x Kelly capped at {settings.max_stake_units:g}u; gap rule {settings.gap_points:g} pts\n")
     print(report.terminal_summary(best, preds))
     n_bet = (best["decision"] != "NO BET").sum()
     print(f"\n{n_bet} bet(s) of {len(best)} markets. Full reasoning per game in the report.")
 
     val = ROOT / "reports" / "validation_summary.md"
-    md = report.header(season, week, SOURCES, track.model_version(), model, settings.min_edge,
+    md = report.header(season, week, SOURCES, track.model_version(), model, settings,
                        val.read_text() if val.exists() else None)
     for g in preds.itertuples(index=False):
-        md += "\n" + report.game_section(g, contexts[g.game_id], rows[rows["game_id"] == g.game_id], coefs, model)
+        md += "\n" + report.game_section(g, contexts[g.game_id], rows[rows["game_id"] == g.game_id], coefs, model,
+                                         settings)
     out = ROOT / "reports" / ("dev" if args.now or track.model_version().endswith("-modified") else "") \
         / f"{season}_week{week:02d}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -284,11 +285,12 @@ def cmd_recommend(args):
                                              f" - {(end - pd.Timedelta(days=1)).strftime('%a %b %d')}")
     print(f"\n{span}  |  {len(day)} games  |  "
           f"{'live odds' if live else 'historical closing lines, model fit on earlier games only'}  |  "
-          f"flag: EV > {settings.min_edge:.0%}\n")
+          f"flag: EV > {settings.min_edge:.1%}; stakes {settings.kelly_fraction:g}x Kelly capped at "
+          f"{settings.max_stake_units:g}u; gap rule {settings.gap_points:g} pts\n")
     print(table(out, head, align))
     b = show[show["decision"] != "NO BET"]
-    print(f"\n{len(b)} bet(s), {b['stake_units'].sum():.2f}u total stake (quarter Kelly, max "
-          f"{decide.MAX_STAKE_UNITS:g}u). Decision reasons: `predict` report or the saved CSV.")
+    print(f"\n{len(b)} bet(s), {b['stake_units'].sum():.2f}u total stake ({settings.kelly_fraction:g}x Kelly, "
+          f"max {settings.max_stake_units:g}u per bet). Decision reasons: `predict` report or the saved CSV.")
     if graded and rec:
         print(f"Result: {rec.count('W')}-{rec.count('L')}-{rec.count('P')}, {total:+.2f}u "
               "(one day is noise; see `validate` for the full record)")
@@ -306,13 +308,14 @@ def cmd_validate(args):
     seasons = list(range(args.start, last + 1))
     settings = load_settings(min_edge=args.min_edge)
     min_edge = settings.min_edge
+    print(f"Settings: {settings.describe()}")
     print(f"Validating {seasons[0]}-{seasons[-1]} (each season predicted by a model fit on earlier ones) ...")
-    preds, bets = validate.run(feat, seasons, min_edge)
+    preds, bets = validate.run(feat, seasons, settings)
     print("Replay at standard retail juice (4.76% overround, as -110/-110) ...")
-    _, bets_retail = validate.run(feat, seasons, min_edge, bet_overround=0.0476)
+    _, bets_retail = validate.run(feat, seasons, settings, bet_overround=0.0476)
     print("Ablation: same model without the QB-change feature ...")
     no_qb = [f for f in validate.FEATURES if f != "f_qb"]
-    preds_nq, _ = validate.run(feat, seasons, min_edge, features=no_qb, with_bets=False)
+    preds_nq, _ = validate.run(feat, seasons, settings, features=no_qb, with_bets=False)
 
     probs = validate.prob_table(preds)
     # ablation scored on exactly the same rows as the full model
@@ -345,7 +348,8 @@ def cmd_validate(args):
     print(cal.round(3).to_string(index=False))
     print("\nMargin error by season (points):")
     print(mae.round(2).to_string(index=False))
-    print(f"\nHistorical replay at CLOSING consensus prices (EV > {min_edge:.0%}, robust to 0.5 pt, 4-pt gap rule;"
+    print(f"\nHistorical replay at CLOSING consensus prices (EV > {min_edge:.1%}, robust to 0.5 pt, "
+          f"{settings.gap_points:g}-pt gap rule;"
           " live-only rules NOT applied), one side per market:")
     print(bt.round(4).to_string(index=False))
     print("\nSame rules, every bet priced at standard retail juice (4.76% overround):")
@@ -356,15 +360,17 @@ def cmd_validate(args):
     fmt_b = {"flat ROI": "{:+.1%}", "flat units": "{:+.1f}", "flat max drawdown": "{:.1f}",
              "qtr-Kelly ROI": "{:+.1%}", "qtr-Kelly max drawdown": "{:.1f}"}
     md = [f"# Validation {seasons[0]}-{seasons[-1]}", "", validate.__doc__.strip(), "",
+          f"Settings used: `{settings.describe()}`", "",
           "## Probability quality (identical rows for every predictor)", "",
           "`model minus market (Brier)`: negative means the model beat the closing market; the CI resamples "
           "whole games.", "", validate.to_markdown(probs), "",
           "## Model minus market Brier, by season", "", validate.to_markdown(seas), "",
           "## Calibration of win probabilities", "", validate.to_markdown(cal), "",
           "## Margin error by season", "", validate.to_markdown(mae), "",
-          f"## Historical replay at closing consensus prices (staking: flat 1u, and quarter Kelly capped at "
-          f"{settings.max_stake_units:g}u)", "",
-          "Rules applied: EV above the threshold, robustness to a 0.5-pt error, 4-pt gap. Not applied: quote "
+          f"## Historical replay at closing consensus prices (staking: flat 1u, and {settings.kelly_fraction:g}x "
+          f"Kelly capped at {settings.max_stake_units:g}u)", "",
+          f"Rules applied: EV above {settings.min_edge:.1%}, robustness to a 0.5-pt error, "
+          f"{settings.gap_points:g}-pt gap. Not applied: quote "
           "freshness, multi-book reference, starter availability, weather. CIs resample whole games, so a "
           "spread, moneyline and total on the same game are not treated as independent.", "",
           validate.to_markdown(bt, fmt_b), "",

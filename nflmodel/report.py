@@ -40,7 +40,7 @@ def drivers(g, coefs: dict) -> list[str]:
     return [f"{FEATURE_NAMES[k]}: {v:+.1f} pts to {g.home_team}" for k, v in top if abs(v) >= 0.1]
 
 
-def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model) -> str:
+def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model, settings) -> str:
     out = [f"## {g.away_team} @ {g.home_team}", ""]
     out += ["**Verified facts** (read from dated sources)", ""] + [f"- {f}" for f in ctx.facts]
     out += ["", "**Model estimate** (reproducible calculation, see README)", ""]
@@ -65,7 +65,8 @@ def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model) ->
         line = f"- {MARKET[r['market']]}: **{r['decision']}**"
         if r["decision"] != "NO BET":
             line += (f" {_bet(r)} {int(r['price']):+d}, stake {r['stake_units']:g}u "
-                     f"(quarter Kelly); still +EV at {_fmt_price(r['min_price'])} or better")
+                     f"({settings.kelly_fraction:g}x Kelly, cap {settings.max_stake_units:g}u); still "
+                     f"+{settings.min_edge:.1%} EV at {_fmt_price(r['min_price'])} or better")
         line += f". {r['reasons'] or 'All checks passed.'}"
         out.append(line)
         if "reference" in r and isinstance(r["reference"], str):
@@ -82,9 +83,12 @@ def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model) ->
     return "\n".join(out) + "\n"
 
 
-def header(season, week, sources: dict, version: str, model, min_edge: float, validation: str | None) -> str:
+def header(season, week, sources: dict, version: str, model, settings, validation: str | None) -> str:
     out = [f"# NFL {season} Week {week} - model report", "",
-           f"Model version `{version}`. Flag threshold: EV > {min_edge:.0%} at the available price.", "",
+           f"Model version `{version}`. Flag threshold: EV > {settings.min_edge:.1%} at the available price. "
+           f"Stakes: {settings.kelly_fraction:g} x full Kelly, capped at {settings.max_stake_units:g} units. "
+           f"Model-vs-market gap rule: {settings.gap_points:g} pts.", "",
+           f"All settings used: `{settings.describe()}`", "",
            "## Data sources", "", "| Source | Retrieved (UTC) | Server last-modified | Notes |", "|---|---|---|---|"]
     for name, s in sources.items():
         notes = ", ".join(f"{k}: {v}" for k, v in s.items()

@@ -28,7 +28,8 @@ Horizon-matched data is collected from now on by `run.py collect` / `predict`
 snapshots; nothing is backfilled.
 
 Decision rules replayed historically: EV > min_edge at the consensus closing price,
-robustness to a 0.5-point error, and the 4-point model-vs-market gap rule. NOT
+robustness to a 0.5-point error, and the gap_points model-vs-market rule, all from
+the Settings passed in (the report prints the values used). NOT
 replayed (no data): quote timestamps/freshness, the multi-book leave-one-book-out
 reference, starter-availability conditions, the outdoor-total weather rule, and the
 executable/conditional distinction. Historical "bets" are therefore closer to
@@ -44,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 from . import decide, metrics
+from .config import Settings
 from .backtest import grade, profit
 from .model import _logistic, fit, novig_first
 from .odds import consensus_offers, no_vig
@@ -79,24 +81,25 @@ def overround_by_season(feat: pd.DataFrame) -> pd.DataFrame:
     return g.groupby("season")[["spread_or", "ml_or", "total_or"]].median().reset_index()
 
 
-def _decisions(model, test: pd.DataFrame, min_edge: float) -> pd.DataFrame:
+def _decisions(model, test: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     offers = consensus_offers(test)
     rows = []
     for g in test.itertuples(index=False):
         ctx = decide.GameContext()
-        if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= decide.GAP_POINTS:
+        if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= settings.gap_points:
             ctx.block["spread"].append("gap"); ctx.block["ml"].append("gap")
-        if pd.notna(g.total_line) and abs(g.model_total - g.total_line) >= decide.GAP_POINTS:
+        if pd.notna(g.total_line) and abs(g.model_total - g.total_line) >= settings.gap_points:
             ctx.block["total"].append("gap")
-        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, min_edge)
+        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings)
     return pd.DataFrame(rows)
 
 
-def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
+def run(feat: pd.DataFrame, seasons: list[int], settings: Settings | None = None,
         features: list[str] | None = None, with_bets: bool = True, bet_overround: float | None = None,
         total_features: list[str] | None = None, verbose: bool = True):
     """bet_overround: if set, the betting replay prices every bet at this fixed overround
     (e.g. 0.0476 = -110/-110) instead of the recorded consensus prices."""
+    settings = settings or Settings()
     played = feat[feat["result"].notna()]
     first = int(played["season"].min())
     preds, bets = [], []
@@ -135,15 +138,14 @@ def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
         preds.append(test)
 
         if with_bets:
-            d = _decisions(model, revig(test, bet_overround) if bet_overround else test, min_edge)
+            d = _decisions(model, revig(test, bet_overround) if bet_overround else test, settings)
             d = decide.best_per_market(d)
             d = d.merge(test[["game_id", "season", "gameday", "home_score", "away_score"]], on="game_id")
             d["result"] = [grade(r.market, r.side, r.point, r.home_score, r.away_score)
                            for r in d.itertuples(index=False)]
             d["flat"] = [profit(r, p) for r, p in zip(d["result"], d["price"])]
-            d["kelly_units"] = [profit(r, p) * min(k * decide.KELLY_FRACTION * 100, decide.MAX_STAKE_UNITS)
-                                for r, p, k in zip(d["result"], d["price"], d["kelly"])]
-            d["kelly_stake"] = [min(k * decide.KELLY_FRACTION * 100, decide.MAX_STAKE_UNITS) for k in d["kelly"]]
+            d["kelly_stake"] = [decide.stake_units(k, settings) for k in d["kelly"]]
+            d["kelly_units"] = [profit(r, p) * st for r, p, st in zip(d["result"], d["price"], d["kelly_stake"])]
             bets.append(d)
         if verbose:
             print(f"  {s}: {len(test)} games", flush=True)

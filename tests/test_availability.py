@@ -58,6 +58,7 @@ import numpy as np  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from nflmodel import market  # noqa: E402
+from nflmodel.config import Settings  # noqa: E402
 from nflmodel.decide import build_context, decide_game  # noqa: E402
 from nflmodel.model import MARGINS, TOTALS, FittedModel, OutcomeDist  # noqa: E402
 from nflmodel.timeutil import parse_utc  # noqa: E402
@@ -100,9 +101,9 @@ def offers():
 class DecisionTiers(unittest.TestCase):
     def decide(self, inj, feed_ok):
         m, g, o = fake_model(), game_row(), offers()
-        ctx = build_context(g, inj, {}, {"f_qb": 0.0, "f_hfa": 2.0}, 0.0, {}, {}, injury_feed_ok=feed_ok)
+        ctx = build_context(g, inj, {}, {"f_qb": 0.0, "f_hfa": 2.0}, 0.0, {}, {}, Settings(), injury_feed_ok=feed_ok)
         refs = market.references_for_game(o, m, min_books=2)
-        rows = decide_game(m, g, o, ctx, 0.02, refs=refs, min_ref_books=2)
+        rows = decide_game(m, g, o, ctx, Settings(), refs=refs)
         return next(r for r in rows if r["market"] == "spread" and r["side"] == "home")
 
     def test_missing_injury_feed_blocks_executable_bet(self):

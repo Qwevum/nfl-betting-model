@@ -411,3 +411,43 @@ committed separately (`d3260e0`).
 **Measured effect:** none of G1–G4 passes (table in `docs/EXPERIMENTS.md`).
 No holdout run was made, and no group was promoted. G2 and G3 slightly lower
 the model's own-line error but don't improve the market-anchored probabilities.
+
+---
+
+# Reliability fixes (second review)
+
+## 8. Validate settings and pass them through every decision
+
+**Problem:**
+* `decide.py` hardcoded the Kelly fraction (0.25), the stake cap (2u) and the
+  4-point gap rule.
+* `settings.toml` could change `min_edge`, but not how bets were sized or
+  blocked.
+* Reports printed fixed text ("quarter Kelly", "4-pt gap") regardless of
+  configuration.
+* Settings were never range-checked.
+
+**Files:** `nflmodel/config.py`, `nflmodel/decide.py`, `nflmodel/validate.py`,
+`nflmodel/report.py`, `run.py`, `README.md`, `tests/test_settings.py` (new),
+`tests/test_availability.py`.
+
+**Change:**
+* `Settings` validates itself on creation. It rejects wrong types (including
+  booleans and strings), NaN and infinite values, out-of-range values, unknown
+  `settings.toml` keys, and a clock skew no smaller than the odds age limit.
+* `build_context`, `decide_game` and `validate.run` take the `Settings` object.
+* Stakes come from `stake_units(full_kelly, settings)`.
+* The weekly and validation reports print every setting actually used.
+
+**Verification:**
+* 8 new tests:
+  * invalid values are rejected
+  * `settings.toml` overrides and unknown keys are handled
+  * on a synthetic market, lowering `max_stake_units` caps the stake
+  * doubling `kelly_fraction` doubles it
+  * `gap_points` 10 vs 4 turns a BET into NO BET
+  * raising `min_edge` removes the bet
+
+  The suite passes: 66 tests.
+* A historical replay of 2020 with `max_stake_units=0.5` gives the same 104
+  bets, with the largest stake 0.5u instead of 2u.
