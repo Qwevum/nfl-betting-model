@@ -681,3 +681,16 @@ unverified provider plan detail ("free tier").
 * With a dummy key it reported "not reachable" (proxy 403). The Odds API host
   is blocked by this sandbox's network policy, so the live path cannot be
   exercised here.
+
+## 14. Regenerated validation report (no model change)
+
+`python run.py validate --no-refresh` was rerun after changes 8–13:
+* All bets, records, flat ROIs, confidence intervals and probability scores are
+  identical.
+* The text now prints the settings used.
+* Three quarter-Kelly ROI cells moved by 0.1 pp (ml +9.6% → +9.5%, total
+  −3.2% → −3.1%, retail ml +16.3% → +16.2%). The replay now sizes stakes with
+  the same `stake_units()` as live decisions, which rounds to 0.01u.
+
+No accuracy or profitability claim follows from changes 8–14; they are
+reliability fixes.

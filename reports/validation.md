@@ -30,7 +30,8 @@ Horizon-matched data is collected from now on by `run.py collect` / `predict`
 snapshots; nothing is backfilled.
 
 Decision rules replayed historically: EV > min_edge at the consensus closing price,
-robustness to a 0.5-point error, and the 4-point model-vs-market gap rule. NOT
+robustness to a 0.5-point error, and the gap_points model-vs-market rule, all from
+the Settings passed in (the report prints the values used). NOT
 replayed (no data): quote timestamps/freshness, the multi-book leave-one-book-out
 reference, starter-availability conditions, the outdoor-total weather rule, and the
 executable/conditional distinction. Historical "bets" are therefore closer to
@@ -39,6 +40,8 @@ executable bets.
 
 Model design choices (features, hyperparameters, calibration method) were made
 after looking at 2015-2025 results, so those seasons are not a pristine holdout.
+
+Settings used: `max_odds_age_minutes=30, clock_skew_minutes=2, kickoff_match_minutes=10, qb_confirm_max_age_minutes=2880, weather_max_age_minutes=720, weather_valid_window_minutes=180, min_reference_books=2, horizon_minutes=60, horizon_tolerance_minutes=15, min_edge=0.02, gap_points=4, kelly_fraction=0.25, max_stake_units=2`
 
 ## Probability quality (identical rows for every predictor)
 
@@ -113,15 +116,15 @@ after looking at 2015-2025 results, so those seasons are not a pristine holdout.
 | 2025.0000 | 285.0000 | 9.6702 | 10.0273 | 9.6871 | 10.1324 |
 | 2026.0000 | 65.0000 | 9.7538 | 9.5708 | 9.7490 | 9.8149 |
 
-## Historical replay at closing consensus prices (staking: flat 1u, and quarter Kelly capped at 2u)
+## Historical replay at closing consensus prices (staking: flat 1u, and 0.25x Kelly capped at 2u)
 
-Rules applied: EV above the threshold, robustness to a 0.5-pt error, 4-pt gap. Not applied: quote freshness, multi-book reference, starter availability, weather. CIs resample whole games, so a spread, moneyline and total on the same game are not treated as independent.
+Rules applied: EV above 2.0%, robustness to a 0.5-pt error, 4-pt gap. Not applied: quote freshness, multi-book reference, starter availability, weather. CIs resample whole games, so a spread, moneyline and total on the same game are not treated as independent.
 
 | market | bets | games | W-L-P | flat ROI | flat ROI 95% (game-clustered) | flat units | flat max drawdown | qtr-Kelly ROI | qtr-Kelly max drawdown |
 |---|---|---|---|---|---|---|---|---|---|
-| ml | 219 | 219 | 101-117-1 | +10.7% | -7.1% to +28.8% | +23.3 | 20.6 | +9.6% | 18.9 |
+| ml | 219 | 219 | 101-117-1 | +10.7% | -7.1% to +28.8% | +23.3 | 20.6 | +9.5% | 18.9 |
 | spread | 669 | 669 | 332-319-18 | +3.4% | -4.6% to +11.2% | +22.5 | 26.1 | +2.5% | 39.1 |
-| total | 376 | 376 | 182-190-4 | -2.3% | -12.0% to +7.3% | -8.5 | 23.4 | -3.2% | 28.2 |
+| total | 376 | 376 | 182-190-4 | -2.3% | -12.0% to +7.3% | -8.5 | 23.4 | -3.1% | 28.2 |
 | all | 1264 | 1008 | 615-626-23 | +3.0% | -3.1% to +8.9% | +37.4 | 30.5 | +2.0% | 47.2 |
 
 ### Same rules at standard retail juice (4.76% overround)
@@ -130,7 +133,7 @@ The recorded consensus prices carry about 2.4% overround through 2022 and about 
 
 | market | bets | games | W-L-P | flat ROI | flat ROI 95% (game-clustered) | flat units | flat max drawdown | qtr-Kelly ROI | qtr-Kelly max drawdown |
 |---|---|---|---|---|---|---|---|---|---|
-| ml | 74 | 74 | 29-44-1 | +16.0% | -19.8% to +51.6% | +11.9 | 8.0 | +16.3% | 7.2 |
+| ml | 74 | 74 | 29-44-1 | +16.0% | -19.8% to +51.6% | +11.9 | 8.0 | +16.2% | 7.2 |
 | spread | 342 | 342 | 165-166-11 | +0.3% | -9.7% to +11.1% | +0.9 | 19.4 | +0.1% | 24.7 |
 | total | 121 | 121 | 58-62-1 | -4.4% | -20.7% to +12.8% | -5.3 | 13.1 | -4.6% | 14.8 |
 | all | 537 | 486 | 252-272-13 | +1.4% | -7.6% to +10.7% | +7.5 | 27.6 | +0.9% | 35.3 |
