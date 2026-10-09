@@ -111,3 +111,62 @@ target. Bet counts and ROI are reported but are NOT a criterion: more bets or a
 higher historical ROI are not evidence of improvement, and the single consensus
 price per side cannot test price shopping (the `market` arm cannot bet on it by
 construction). No thresholds are tuned on these results.
+
+
+## G5 and G6: preseason prior and ratings hyperparameters (protocol written 2026-10-09, before any G5/G6 run)
+
+Both groups change how the ratings are BUILT (ratings.py), not which features the
+regressions use. Each arm rebuilds the full feature table in date order with its own
+ratings settings; both arms then use the same features list, the same walk-forward fits
+and calibration, and are scored on identical games. Development seasons 2015–2021 only;
+the general method, metrics and acceptance criteria above apply unchanged (paired
+game-level bootstrap of log-loss differences, criteria 1–3, holdout once and only after a
+development pass).
+
+**Disclosure.** Before writing this, the spread calibration was diagnosed on the current
+model (reports/spread_calibration_diagnosis.md): the offset c is about 0 with a CI that
+includes 0. No G5/G6 configuration was run or looked at.
+
+### G5: informed preseason prior
+
+Currently every team rating keeps `carry` = 60% at a new season and regresses to 0.
+* **G5b (runnable now): prior-season rating adjusted for a change of starting QB.** At a
+  team's first game of a new season, if the starter differs from the QB who played most of
+  the team's last game of the previous season, the points rating moves by
+  `preseason_qb_pts` x (new QB rating - previous QB rating), and the team's QB baseline is
+  reset to the new QB, so `f_qb` does not count the same change again. In-season QB changes
+  are unchanged. `preseason_qb_pts = 35` (about 35 dropbacks per game x EPA per dropback =
+  points per game), fixed in advance and not tuned.
+* **G5a (needs data): preseason win totals.** `data/preseason_win_totals.csv` with season,
+  team, win_total, odds, retrieved_utc. Rows retrieved at or after the season's first
+  kickoff are rejected (they could contain information from the season). A win total
+  becomes a prior margin `13.5 * Phi^-1(win_total / games)`, centered on the league each
+  season, and the new-season points rating is `(1 - w) * carry * rating + w * prior` with
+  `w = 0.5`, fixed in advance. Not run unless the file is supplied.
+
+### G6: ratings hyperparameter search
+
+Search space (one parameter moved at a time from the current values; 12 configurations):
+
+| parameter | current | tried |
+|---|---|---|
+| k_margin | 0.07 | 0.05, 0.09 |
+| a_eff | 0.10 | 0.07, 0.13 |
+| carry | 0.60 | 0.50, 0.70 |
+| qb_shrink | 150 | 100, 250 |
+| qb_decay | 0.97 | 0.95, 0.985 |
+| a_pace | 0.10 | 0.07, 0.13 |
+
+Then one combined configuration: every single-parameter move that lowered the score,
+applied together (if two moves of the same parameter lowered it, the lower one). That
+makes at most 13 configurations besides the current one. Nothing else is tried.
+
+**Score** of a configuration, development seasons 2015–2021, walk-forward: the
+ratings-only own-line MAE of the margin (primary) and the home-covers log loss of the
+live probability (reported). Every configuration and its scores are recorded in
+logs/experiments.jsonl (group `G6-search`).
+
+**Selection.** The configuration with the lowest own-line MAE is compared with the current
+values under the general criteria (group `G6`). Selecting the best of several
+configurations on the development seasons and then testing it on the same seasons favors
+it; the holdout is the guard: run once, only if the development criteria pass.
