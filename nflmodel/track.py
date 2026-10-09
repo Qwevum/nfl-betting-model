@@ -70,10 +70,35 @@ def issue_time(fc: pd.DataFrame) -> pd.Series:
     return issued.where(done.notna(), pd.NaT)
 
 
-def at_horizon(fc: pd.DataFrame, settings) -> tuple[pd.DataFrame, pd.DataFrame]:
+HORIZONS = ("kickoff", "early")
+
+
+def window(settings, which: str = "kickoff") -> tuple[float, float]:
+    """(start, end) of a decision window in minutes BEFORE kickoff (start > end).
+    kickoff: [kickoff - horizon - tolerance, kickoff - horizon]; early: the early decision horizon."""
+    if which == "kickoff":
+        return settings.horizon_minutes + settings.horizon_tolerance_minutes, settings.horizon_minutes
+    if which == "early":
+        return settings.early_horizon_max_hours * 60, settings.early_horizon_min_hours * 60
+    raise ValueError(f"unknown horizon {which!r}")
+
+
+def horizon_tag(lead_minutes: float, settings) -> str:
+    """'kickoff-60' style tag for a forecast issued lead_minutes before kickoff."""
+    if lead_minutes is None or pd.isna(lead_minutes):
+        return "unknown"
+    for which in HORIZONS:
+        a, b = window(settings, which)
+        if b <= lead_minutes <= a:
+            return "early" if which == "early" else f"kickoff-{settings.horizon_minutes:g}"
+    return "other"
+
+
+def at_horizon(fc: pd.DataFrame, settings, which: str = "kickoff") -> tuple[pd.DataFrame, pd.DataFrame]:
     """Select, per game, ONE run whose forecasts were issued inside the horizon window.
 
-    Window: [kickoff - horizon - tolerance, kickoff - horizon]. Forecasts issued after
+    Window (which="kickoff"): [kickoff - horizon - tolerance, kickoff - horizon]; which="early":
+    the early decision horizon (settings.early_horizon_*). Forecasts issued after
     the cutoff (including runs that completed late) or before the window start (e.g.
     days earlier) are excluded. Among eligible runs the latest is used for every side
     of that game, so sides from different runs are never mixed.
@@ -87,8 +112,9 @@ def at_horizon(fc: pd.DataFrame, settings) -> tuple[pd.DataFrame, pd.DataFrame]:
     fc["_kick"] = pd.to_datetime(fc["kickoff_utc"].map(parse_utc), utc=True)
     fc["_run"] = fc["run_id"] if "run_id" in fc else None
     fc["_run"] = fc["_run"].where(fc["_run"].notna(), "legacy@" + fc["recorded_utc"])
-    cutoff = fc["_kick"] - pd.Timedelta(minutes=settings.horizon_minutes)
-    start = cutoff - pd.Timedelta(minutes=settings.horizon_tolerance_minutes)
+    w_start, w_end = window(settings, which)
+    cutoff = fc["_kick"] - pd.Timedelta(minutes=w_end)
+    start = fc["_kick"] - pd.Timedelta(minutes=w_start)
     fc["_lead"] = (fc["_kick"] - fc["_issued"]).dt.total_seconds() / 60
     fc["_ok"] = fc["_issued"].notna() & (fc["_issued"] >= start) & (fc["_issued"] <= cutoff)
 
@@ -106,10 +132,10 @@ def at_horizon(fc: pd.DataFrame, settings) -> tuple[pd.DataFrame, pd.DataFrame]:
             continue
         if runs["issued"].isna().all():
             why = "only legacy forecasts (pre-fix run-start timestamps; completion time unknown)"
-        elif (runs["lead"] < settings.horizon_minutes).all():
-            why = f"all forecasts issued after the cutoff (kickoff - {settings.horizon_minutes:g} min)"
+        elif (runs["lead"] < w_end).all():
+            why = f"all forecasts issued after the cutoff (kickoff - {w_end:g} min)"
         else:
-            why = (f"no forecast issued inside the {settings.horizon_tolerance_minutes:g}-min window "
+            why = (f"no forecast issued inside the {w_start - w_end:g}-min window "
                    f"(closest lead {runs['lead'].dropna().min():.0f} min)" if runs["lead"].notna().any()
                    else "no usable issue time")
         cov.append({**row, "status": "excluded", "selected_run": None, "lead_minutes": np.nan, "reason": why})

@@ -264,6 +264,10 @@ def record(rows, preds, art, settings, clock, args, games, fc=None, umeta=None) 
                 "game_forecasts.csv": fc},
         meta={"model_version": version, "settings": vars(settings), "reprice": art.get("reprice"), **timeline})
     kick = dict(zip(preds["game_id"], preds["kickoff_utc"].map(fmt)))
+    done = parse_utc(run_utc)
+    lead = rows["game_id"].map(lambda g: (dict(zip(preds["game_id"], preds["kickoff_utc"]))[g] - done)
+                               .total_seconds() / 60)
+    rows = rows.assign(lead_minutes_at_issue=lead, horizon_tag=lead.map(lambda m: track.horizon_tag(m, settings)))
     recs = store.record_forecasts(
         rows.assign(kickoff_utc=rows["game_id"].map(kick),
                     season=rows["game_id"].map(dict(zip(preds["game_id"], preds["season"]))),
@@ -958,6 +962,35 @@ def cmd_grade(args):
     now = parse_utc(args.now) if args.now else now_utc()
     g = track.grade_all(games, settings, slate=slate, now=now, markets=markets)
     track.report(g, settings, f"{desc}; markets {','.join(markets)}")
+    from nflmodel import closing
+    refs = closing.last_references(closing.snapshot_quotes(), closing.kickoff_map(games), settings.min_reference_books)
+    print("\n4) CLOSING-LINE VALUE vs the last valid pre-kickoff reference in snapshots "
+          f"({len(refs)} game/market references; median of >= {settings.min_reference_books} books)")
+    fc_all = store.forecasts_frame()
+    if len(fc_all):
+        fc_all = fc_all[fc_all["game_id"].isin(slate["game_id"]) & fc_all["market"].isin(markets)]
+    for which, label in (("kickoff", f"kickoff - {settings.horizon_minutes:g} min"), ("early", "early horizon")):
+        sel, _ = track.at_horizon(fc_all, settings, which) if len(fc_all) else (pd.DataFrame(), None)
+        if sel is None or sel.empty:
+            print(f"   forecasts at {label}: none selected")
+            continue
+        best = sel[sel["is_best_side"].astype(bool)] if "is_best_side" in sel else sel
+        c = closing.clv(best, refs)
+        g[f"clv_{which}"] = c
+        print(f"   forecasts at {label} (best side per market):")
+        print("   " + closing.summary(c).round(4).to_string(index=False).replace("\n", "\n   "))
+    led = g.get("ledger")
+    if led is not None and len(led):
+        fh = store.forecasts_frame()
+        mp = fh[["hash", "market_prob"]] if len(fh) else pd.DataFrame(columns=["hash", "market_prob"])
+        led_ = led.drop(columns=["market_prob"], errors="ignore").merge(
+            mp.rename(columns={"hash": "forecast_hash"}), on="forecast_hash", how="left")
+        c = closing.clv(led_, refs)
+        g["clv_ledger"] = c
+        print("   wagers (ledger):")
+        print("   " + closing.summary(c).round(4).to_string(index=False).replace("\n", "\n   "))
+    if refs.empty:
+        print("   no snapshot has two-sided quotes from enough books before kickoff yet: run `collect` on a schedule")
     for name, df in g.items():
         df.to_csv(ROOT / "logs" / f"graded_{name}.csv", index=False)
 

@@ -131,7 +131,9 @@ FORECAST_FIELDS = ["game_id", "kickoff_utc", "season", "week", "away_team", "hom
 # missing values as "not computed", never as zero.
 UNCERTAINTY_FIELDS = ["p_lose", "p_win_lo", "p_win_hi", "ev_lo", "ev_hi", "ev_sd", "ev_replicates", "unc_level",
                       "unc_status", "unc_method", "unc_scheme", "unc_seed", "unc_train_hash"]
-FORECAST_FIELDS = FORECAST_FIELDS + UNCERTAINTY_FIELDS
+# Added 2026-10 (early decision horizon): which decision window the run was issued in.
+HORIZON_FIELDS = ["horizon_tag", "lead_minutes_at_issue"]
+FORECAST_FIELDS = FORECAST_FIELDS + UNCERTAINTY_FIELDS + HORIZON_FIELDS
 
 GAME_FORECAST_FIELDS = [
     "game_id", "kickoff_utc", "season", "week", "away_team", "home_team", "postseason", "margin_basis",

@@ -39,6 +39,10 @@ class Settings:
     # Prediction horizon: forecasts are meant to be made this long before kickoff
     horizon_minutes: float = 60.0
     horizon_tolerance_minutes: float = 15.0   # eligible forecasts: [kickoff-horizon-tol, kickoff-horizon]
+    # Early decision horizon (after openers, e.g. Sunday night - Wednesday for a Sunday game): forecasts
+    # issued between these many hours before kickoff are tagged "early" and graded separately.
+    early_horizon_max_hours: float = 168.0
+    early_horizon_min_hours: float = 84.0
     # Decisions
     min_edge: float = 0.02                 # EV per unit staked required to bet
     gap_points: float = 4.0                # model-vs-market gap (pts) that blocks a bet as unexplained
@@ -91,6 +95,8 @@ _RULES = [
     ("weather_valid_window_minutes", float, 0, False, 24 * 60, True),
     ("horizon_minutes", float, 0, False, 7 * 24 * 60, True),
     ("horizon_tolerance_minutes", float, 0, False, 7 * 24 * 60, True),
+    ("early_horizon_max_hours", float, 0, False, 21 * 24, True),
+    ("early_horizon_min_hours", float, 0, False, 21 * 24, True),
     ("min_edge", float, 0, True, 1, False),
     ("gap_points", float, 0, False, 60, True),
     ("kelly_fraction", float, 0, False, 1, True),
@@ -145,6 +151,10 @@ def validate_settings(s: Settings) -> None:
         bad = [b for b in (x.strip().lower() for x in s.actionable_books.split(",")) if b and not _BOOK_KEY.match(b)]
         if bad:
             errors.append(f"actionable_books has invalid bookmaker keys {bad} (use Odds API keys like draftkings)")
+    if not errors and s.early_horizon_min_hours >= s.early_horizon_max_hours:
+        errors.append("early_horizon_min_hours must be smaller than early_horizon_max_hours")
+    if not errors and s.early_horizon_min_hours * 60 <= s.horizon_minutes + s.horizon_tolerance_minutes:
+        errors.append("the early horizon must end before the kickoff horizon window starts")
     if not errors and s.clock_skew_minutes >= s.max_odds_age_minutes:
         errors.append("clock_skew_minutes must be smaller than max_odds_age_minutes")
     if errors:
