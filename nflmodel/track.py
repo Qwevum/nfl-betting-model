@@ -1,39 +1,27 @@
-"""Prediction log and grading.
+"""Grading of the forecast history and the placed-bet ledger, reported separately.
 
-Every `predict` run appends one row per game, market and side to
-logs/predictions.csv: bets AND passes, with the model version, odds, probabilities
-and decision. The file is append-only; nothing is ever removed, so results
-can't be selectively reported.
-
-`grade` uses, for each game/market/side, the last prediction logged before
-kickoff, and reports:
-  * probability quality for every logged prediction (Brier score, log loss)
-    next to the market's no-vig probability
-  * betting results for BET rows at the logged stake, and flat 1 unit
-  * closing-line value (CLV) of the bets
-  * what the passes would have done, for transparency
+1. Forecast quality: every side the model priced, scored at the prediction
+   horizon (the latest forecast recorded at or before kickoff - horizon), and
+   compared with the market reference on exactly the same rows.
+2. Recommendations (hypothetical, NOT wagers): the best side per market,
+   split into executable ("BET") and conditional ("BET IF ...") tiers, flat 1u.
+3. Actual wagers: only bets recorded in the ledger with `run.py place`.
 """
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
+from . import metrics, store
 from .backtest import grade, profit
-from .data import utcnow
 from .odds import implied_probability, no_vig
+from .timeutil import parse_utc
 
 ROOT = Path(__file__).resolve().parent.parent
-LOG = ROOT / "logs" / "predictions.csv"
-ET = ZoneInfo("America/New_York")
-
-LOG_COLS = ["logged_utc", "model_version", "season", "week", "game_id", "kickoff_utc", "away_team",
-            "home_team", "market", "side", "team", "book", "point", "price", "price_source", "odds_time",
-            "p_win", "p_push", "model_prob", "implied", "market_prob", "ev", "ev[fair 0.5 worse]",
-            "ev[market only]", "decision", "stake_units", "reasons"]
+LEGACY_LOG = ROOT / "logs" / "predictions.csv"
 
 
 def model_version() -> str:
@@ -47,93 +35,117 @@ def model_version() -> str:
         return "unknown"
 
 
-def kickoff_utc(gameday, gametime) -> str:
-    t = str(gametime) if isinstance(gametime, str) else "13:00"
-    local = pd.Timestamp(f"{pd.Timestamp(gameday).date()} {t}").tz_localize(ET)
-    return local.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def log_predictions(rows: pd.DataFrame, preds: pd.DataFrame) -> Path:
-    LOG.parent.mkdir(exist_ok=True)
-    g = preds.set_index("game_id")
-    df = rows.copy()
-    df["logged_utc"] = utcnow()
-    df["model_version"] = model_version()
-    for col in ("season", "week", "away_team", "home_team"):
-        df[col] = df["game_id"].map(g[col])
-    df["kickoff_utc"] = [kickoff_utc(g.loc[i, "gameday"], g.loc[i, "gametime"]) for i in df["game_id"]]
-    for c in LOG_COLS:
-        if c not in df.columns:
-            df[c] = np.nan
-    df[LOG_COLS].to_csv(LOG, mode="a", header=not LOG.exists(), index=False)
-    return LOG
-
-
-def _brier_logloss(p: np.ndarray, y: np.ndarray) -> tuple[float, float]:
-    p = np.clip(p, 1e-6, 1 - 1e-6)
-    return float(np.mean((p - y) ** 2)), float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
-
-
-def grade_log(games: pd.DataFrame) -> pd.DataFrame | None:
-    if not LOG.exists():
-        print("No predictions logged yet. Run `python run.py predict` first.")
-        return None
-    log = pd.read_csv(LOG)
-    log = log[log["logged_utc"] < log["kickoff_utc"]]           # only pre-kickoff predictions
-    log = (log.sort_values("logged_utc")
-              .groupby(["game_id", "market", "side"]).tail(1))  # latest pre-kickoff view
-    cols = ["game_id", "home_score", "away_score", "spread_line", "total_line",
-            "home_moneyline", "away_moneyline"]
-    df = log.merge(games[cols], on="game_id", how="left")
+def _results(df: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
+    cols = ["game_id", "home_score", "away_score", "spread_line", "total_line", "home_moneyline", "away_moneyline"]
+    df = df.drop(columns=[c for c in cols[1:] if c in df.columns]).merge(games[cols], on="game_id", how="left")
     done = df["home_score"].notna()
     df["result"] = ""
     df.loc[done, "result"] = [grade(r.market, r.side, r.point, r.home_score, r.away_score)
                               for r in df[done].itertuples(index=False)]
-    df["units"] = [profit(r, p) * s if r else np.nan
-                   for r, p, s in zip(df["result"], df["price"], df["stake_units"])]
-    df["flat_units"] = [profit(r, p) if r else np.nan for r, p in zip(df["result"], df["price"])]
-
-    def clv(r):
-        if r.market == "spread" and pd.notna(r.spread_line):
-            return r.point - (-r.spread_line if r.side == "home" else r.spread_line)
-        if r.market == "total" and pd.notna(r.total_line):
-            return (r.total_line - r.point) if r.side == "over" else (r.point - r.total_line)
-        if r.market == "ml" and pd.notna(r.home_moneyline) and pd.notna(r.away_moneyline):
-            h, a = no_vig(r.home_moneyline, r.away_moneyline)
-            return (h if r.side == "home" else a) - implied_probability(r.price)
-        return np.nan
-
-    df["clv"] = df.apply(clv, axis=1)
     return df
 
 
-def report(df: pd.DataFrame) -> None:
-    done = df[(df["result"] != "") & (df["result"] != "P")]
-    print(f"\nLogged predictions (latest before kickoff): {len(df)} sides, {len(done)} graded (pushes excluded)")
-    if done.empty:
-        print("Nothing graded yet.")
-        return
-    y = (done["result"] == "W").to_numpy(float)
-    print("\nProbability quality on every graded side (bets and passes):")
-    print(f"  {'':22s}{'n':>6s}{'Brier':>9s}{'LogLoss':>9s}")
-    b, l = _brier_logloss(done["model_prob"].to_numpy(float), y)
-    print(f"  {'model':22s}{len(done):6d}{b:9.4f}{l:9.4f}")
-    m = done.dropna(subset=["market_prob"])
-    if len(m):
-        mb, ml_ = _brier_logloss(m["market_prob"].to_numpy(float), (m["result"] == "W").to_numpy(float))
-        print(f"  {'market (no-vig)':22s}{len(m):6d}{mb:9.4f}{ml_:9.4f}")
+def _clv(r) -> float:
+    """Closing-line value vs the nflverse closing consensus (points; probability for ML)."""
+    if r.market == "spread" and pd.notna(r.spread_line):
+        return r.point - (-r.spread_line if r.side == "home" else r.spread_line)
+    if r.market == "total" and pd.notna(r.total_line):
+        return (r.total_line - r.point) if r.side == "over" else (r.point - r.total_line)
+    if r.market == "ml" and pd.notna(r.home_moneyline) and pd.notna(r.away_moneyline):
+        h, a = no_vig(r.home_moneyline, r.away_moneyline)
+        return (h if r.side == "home" else a) - implied_probability(r.price)
+    return np.nan
 
-    graded = df[df["result"] != ""]
-    best = graded.sort_values("ev", ascending=False).groupby(["game_id", "market"]).head(1)
-    for label, sub in (("BETS", graded[graded["decision"] != "NO BET"]),
-                       ("PASSES (higher-EV side of each market, not bet)", best[best["decision"] == "NO BET"])):
-        if sub.empty:
-            continue
-        print(f"\n{label}:")
-        for market, g in sub.groupby("market"):
-            w, l_, p = (g["result"] == "W").sum(), (g["result"] == "L").sum(), (g["result"] == "P").sum()
-            unit = "pts" if market != "ml" else "prob"
-            extra = (f"  staked {g['stake_units'].sum():.1f}u -> {g['units'].sum():+.2f}u"
-                     if label == "BETS" else "")
-            print(f"  {market:6s} {w}-{l_}-{p}  flat 1u: {g['flat_units'].sum():+.2f}u{extra}  "
-                  f"avg CLV {g['clv'].mean():+.2f} {unit}")
+
+def at_horizon(fc: pd.DataFrame, horizon_minutes: float) -> pd.DataFrame:
+    """Latest forecast per game/market/side recorded at or before kickoff - horizon."""
+    if fc.empty:
+        return fc
+    rec = fc["recorded_utc"].map(parse_utc)
+    cut = fc["kickoff_utc"].map(parse_utc) - pd.Timedelta(minutes=horizon_minutes)
+    fc = fc[rec <= cut].assign(_rec=rec[rec <= cut])
+    return fc.sort_values("_rec").groupby(["game_id", "market", "side"]).tail(1).drop(columns="_rec")
+
+
+def grade_all(games: pd.DataFrame, horizon_minutes: float, forecasts_path: Path = store.FORECASTS,
+              ledger_path: Path = store.LEDGER) -> dict:
+    out = {}
+    fc = store.forecasts_frame(forecasts_path)
+    if not fc.empty:
+        h = _results(at_horizon(fc, horizon_minutes), games)
+        h["clv"] = h.apply(_clv, axis=1)
+        h["flat_units"] = [profit(r, p) if r else np.nan for r, p in zip(h["result"], h["price"])]
+        out["forecasts"] = h
+    led = store.ledger_frame(ledger_path)
+    if not led.empty:
+        led = _results(led[led["voided"].isna()].copy(), games)
+        led["clv"] = led.apply(_clv, axis=1)
+        led["units"] = [profit(r, p) * s if r else np.nan
+                        for r, p, s in zip(led["result"], led["price"], led["stake_units"])]
+        out["ledger"] = led
+    return out
+
+
+def report(g: dict, horizon_minutes: float) -> None:
+    fc = g.get("forecasts")
+    print(f"\n1) FORECAST QUALITY at the {horizon_minutes:g}-minute horizon")
+    if fc is None or fc.empty:
+        print("   no forecasts recorded at or before the horizon yet")
+    else:
+        done = fc[fc["result"].isin(["W", "L"])].dropna(subset=["model_prob", "market_prob"])
+        n_games = done["game_id"].nunique()
+        print(f"   {len(fc)} sides recorded, {len(done)} graded from {n_games} game(s) (pushes and rows without "
+              "a market reference excluded; model and market scored on the same rows)")
+        if n_games < 50:
+            print(f"   ! only {n_games} game(s): far too few to distinguish model from market")
+        if len(done):
+            y = (done["result"] == "W").to_numpy(float)
+            for name, col in (("model", "model_prob"), ("market reference", "market_prob")):
+                b, l = metrics.brier_logloss(done[col], y)
+                print(f"   {name:18s} Brier {b:.4f}  log loss {l:.4f}")
+    print("\n2) RECOMMENDATIONS (hypothetical, flat 1u; these are NOT wagers)")
+    if fc is not None and not fc.empty:
+        flag = fc["is_best_side"] if "is_best_side" in fc else pd.Series(np.nan, index=fc.index)
+        derived = fc.index.isin(fc.sort_values("ev", ascending=False)
+                                  .groupby(["game_id", "market"]).head(1).index)
+        best = fc[flag.where(flag.notna(), derived).astype(bool)]
+        for tier in ("executable", "conditional"):
+            t = best[(best["tier"] == tier) & (best["result"] != "")]
+            pending = ((best["tier"] == tier) & (best["result"] == "")).sum()
+            if t.empty:
+                print(f"   {tier:11s}: none graded ({pending} pending)")
+                continue
+            w, l_, p = (t["result"] == "W").sum(), (t["result"] == "L").sum(), (t["result"] == "P").sum()
+            print(f"   {tier:11s}: {w}-{l_}-{p}, {t['flat_units'].sum():+.2f}u flat, "
+                  f"avg CLV {t['clv'].mean():+.2f} ({pending} pending)")
+    led = g.get("ledger")
+    print("\n3) ACTUAL WAGERS (ledger)")
+    if led is None or led.empty:
+        print("   none recorded (use `python run.py place`)")
+        return
+    s = led[led["result"] != ""].sort_values("placed_utc")
+    print(f"   {len(led)} placed, {len(s)} settled, {len(led) - len(s)} open")
+    if len(s):
+        w, l_, p = (s["result"] == "W").sum(), (s["result"] == "L").sum(), (s["result"] == "P").sum()
+        print(f"   {w}-{l_}-{p}, staked {s['stake_units'].sum():.2f}u, profit {s['units'].sum():+.2f}u "
+              f"(ROI {s['units'].sum() / s['stake_units'].sum():+.1%}), max drawdown "
+              f"{metrics.max_drawdown(s['units']):.2f}u, avg CLV {s['clv'].mean():+.2f}")
+
+
+def import_legacy(path: Path = LEGACY_LOG) -> int:
+    """One-time import of the pre-store CSV log into the hash-chained history (marked legacy)."""
+    if not path.exists() or any(r["data"].get("legacy") for r in store.read(store.FORECASTS)):
+        return 0
+    df = pd.read_csv(path)
+    rows = []
+    for r in df.to_dict("records"):
+        r = {k: r.get(k) for k in store.FORECAST_FIELDS if k in r} | {
+            "kickoff_utc": r["kickoff_utc"], "model_version": r["model_version"], "run_utc": r["logged_utc"],
+            "legacy": True, "reference": "nflverse consensus (untimed)", "reference_live": False}
+        rows.append(r)
+    for run_utc, chunk in pd.DataFrame(rows).groupby("run_utc", sort=True):
+        recs = chunk.to_dict("records")
+        for rec in recs:
+            rec["tier"] = store.TIER.get(rec.get("decision"), "pass")
+        store.append(store.FORECASTS, "forecast", recs, recorded_utc=run_utc)
+    return len(rows)

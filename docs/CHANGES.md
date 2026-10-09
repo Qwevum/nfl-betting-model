@@ -207,3 +207,73 @@ A confirmed starter from `qb_overrides.csv` settles the question.
 
 **Measured effect:** none on accuracy (a decision rule). Expect fewer executable
 recommendations early in the week.
+
+## 4. Immutable forecast history, input snapshots, and a separate placed-bet ledger
+
+**Problem:** audit issue 5. Forecasts went into a plain CSV that could be edited
+without detection, and graded "BETS" were recommendations, not wagers. Nothing
+recorded what was actually bet, and the exact inputs of a run were not kept.
+
+**Files:**
+* new: `nflmodel/store.py`, `nflmodel/metrics.py`, `tests/test_store.py`,
+  `logs/forecasts.jsonl`
+* rewritten: `nflmodel/track.py`
+* changed: `run.py`, `.gitignore`
+
+**Change:**
+* **Forecast history** (`logs/forecasts.jsonl`): an append-only, hash-chained
+  JSONL log. Each record holds a sequence number and the previous record's
+  hash. `verify-log` and `grade` check the chain, and `append` refuses to write
+  to a broken chain.
+  * Every priced side is recorded, passes included, with a tier: executable
+    (`BET`), conditional (`BET IF CONFIRMED` / `BET IF PRICE AVAILABLE`) or pass.
+  * Each record also carries the model version, settings horizon, run id and
+    snapshot id.
+* **Snapshots** (`snapshots/<run_id>/`): every recorded run copies:
+  * schedule rows for the slate
+  * raw, rejected and valid quotes
+  * references and predictions
+  * the injury file and source timestamps
+  * the three input CSVs
+
+  A manifest of file hashes gives the `snapshot_id`.
+* **Ledger** (`logs/ledger.jsonl`, separate and hash-chained): `place` records
+  an actual wager linked to its forecast hash, with the price, line, book and
+  stake actually obtained. It rejects:
+  * placement at or after kickoff
+  * placement before the forecast existed
+  * non-positive stakes and invalid prices
+  * duplicates and ambiguous forecast ids
+
+  `void` records cancellations, which never delete anything.
+* **`grade`** reports three sections separately:
+  1. forecast quality at the 60-minute horizon, model vs market on identical rows
+  2. hypothetical recommendations by tier (flat 1u, labelled "NOT wagers")
+  3. actual wagers from the ledger: ROI, max drawdown and CLV
+* Runs from uncommitted code or with `--now` are never recorded.
+* The 90 legacy CSV forecasts (Oct 7, model `d3525f5`) were imported once,
+  flagged `legacy`. `logs/predictions.csv` is kept unchanged as the original.
+
+**Verification:**
+* 11 new tests:
+  * the chain verifies
+  * an edited price, a deleted line and reordered lines are each detected, and
+    append is refused after tampering
+  * NaN and timestamps serialize
+  * placement records the actual price and the forecast link
+  * placement is rejected after kickoff, before the forecast, with bad stakes
+    or prices, and for duplicates and ambiguous ids
+  * settlement: a 2u win at −110 gives +1.818u, a push gives 0, and a voided
+    bet is excluded
+  * horizon selection ignores forecasts recorded inside 60 minutes
+  * drawdown values are correct
+  * a cluster bootstrap over 3 identical bets per game is as wide as one bet
+    per game, and >1.5× the naive iid interval
+  * legacy rows without a best-side flag are handled
+
+  The suite passes: 53 tests.
+* `verify-log` gives 90 records, chain intact. `grade` on fresh data graded the
+  6 TB @ DAL sides and prints the small-sample warning.
+
+**Measured effect:** none on accuracy. One game is far too few to compare model
+and market; that comparison accumulates from here.

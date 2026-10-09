@@ -2,6 +2,7 @@ data/
 __pycache__/
 *.pyc
 picks/recommend_*.csv
-logs/graded.csv
+logs/graded_*.csv
 templates/
 reports/dev/
+logs/graded.csv

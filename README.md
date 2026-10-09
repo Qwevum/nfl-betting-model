@@ -167,13 +167,25 @@ kickoff). Historical weather is the observed value, not a forecast. Model design
 choices were made after seeing 2015–2025 results, so the only pristine holdout is
 the prediction log from now on.
 
-## Prediction log
+## Forecast history, snapshots and the bet ledger
 
-`logs/predictions.csv` is append-only: every side of every market, every run,
-with time, model version (git hash), odds and source, probabilities, EV and
-decision. `grade` scores the last prediction before kickoff for each side. It
-reports Brier/log loss for all of them against the market, bet results at the
-logged stake and flat 1u, CLV, and how the passes would have done.
-`logs/archive/` holds development runs from an unreleased model version.
+* **`logs/forecasts.jsonl`**: every side of every market priced by a live run
+  from committed code, recorded before kickoff. Passes are included, and each
+  record carries its tier: executable, conditional or pass. The file is
+  append-only and hash-chained, so `python run.py verify-log` detects any edit,
+  deletion or reordering.
+* **`snapshots/<run_id>/`**: the exact inputs of each recorded run: schedule
+  rows, raw/rejected/valid quotes, references, predictions, the injury file,
+  source timestamps and your input files, plus a manifest of hashes.
+* **`logs/ledger.jsonl`**: only wagers you actually placed, recorded with
+  `python run.py place --forecast <id> --stake <units> [--price ...]`. The id
+  is printed by `predict`. `void` records cancellations.
+* **`python run.py grade`** reports three things separately:
+  1. forecast quality at the 60-minute horizon
+  2. hypothetical recommendations by tier (not wagers)
+  3. actual wagers: ROI, drawdown and CLV
+
+`logs/predictions.csv` holds the original Oct 7 log; its rows were imported
+into the history and flagged `legacy`.
 
 Bet only what you can afford to lose.

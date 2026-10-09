@@ -5,7 +5,9 @@
   python run.py recommend [--date YYYY-MM-DD]        decision table for a game day (live or historical)
   python run.py validate [--from 2015]               out-of-sample validation vs baselines and market
   python run.py ratings                              current team power ratings
-  python run.py grade                                grade the prediction log (bets and passes)
+  python run.py grade                                forecasts, recommendations and wagers, graded separately
+  python run.py place --forecast ID --stake U        record a wager you actually placed
+  python run.py verify-log                           check the hash chains of history and ledger
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from nflmodel import decide, inputs, market, report, track, validate
+from nflmodel import decide, inputs, market, report, store, track, validate
 from nflmodel.config import load_settings
 from nflmodel.timeutil import fmt, kickoff_utc, now_utc, parse_utc
 from nflmodel.backtest import grade as grade_bet, profit
@@ -63,7 +65,9 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
     train = feat[feat["result"].notna() & (feat["gameday"] < cutoff) & (feat["season"] > FIRST_PBP_SEASON)]
     model = fit(train)
     coefs = model.pure.raw_coefs()
-    notes, rejected = [], pd.DataFrame()
+    notes = []
+    art = {"offers_raw": pd.DataFrame(), "offers_rejected": pd.DataFrame(), "offers_valid": pd.DataFrame(),
+           "consensus": pd.DataFrame(), "references": pd.DataFrame(), "injury_season": None}
 
     overrides, weather = {}, {}
     if live:
@@ -73,7 +77,7 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
                          f"is not after {fmt(now)}")
         day = day.drop(started.index)
         if day.empty:
-            return model, coefs, model.predict(day), pd.DataFrame(), {}, notes, rejected
+            return model, coefs, model.predict(day), pd.DataFrame(), {}, notes, art
         overrides, n1 = inputs.load_qb_overrides(day, settings.kickoff_match_minutes)
         weather, n2 = inputs.load_weather(day, settings.kickoff_match_minutes)
         notes += n1 + n2
@@ -88,6 +92,8 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
         notes += n3
         # 1) validate quotes, 2) build the market reference from valid quotes, 3) predict
         valid, rejected = validate_offers(books, inputs.kickoff_map(day), now, settings)
+        art.update(offers_raw=books, offers_rejected=rejected, offers_valid=valid, consensus=consensus,
+                   injury_season=int(day["season"].iloc[0]))
         if len(rejected):
             notes.append(f"{len(rejected)} bookmaker quote(s) rejected before price selection "
                          f"({rejected['reject_reason'].str.split(':').str[0].value_counts().to_dict()})")
@@ -103,6 +109,10 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
                 day.loc[m, "total_line"] = refs[("total", None)].line
             if any(refs[(mk, None)] is not None for mk in ("spread", "ml", "total")):
                 day.loc[m, "reference_kind"] = "live bookmaker quotes"
+        art["references"] = pd.DataFrame([
+            {"game_id": gid, "market": mk, "excluded_book": ex, **{k: v for k, v in vars(r).items() if k != "per_book"},
+             "per_book": str(r.per_book)}
+            for gid, refs in refs_by_game.items() for (mk, ex), r in refs.items() if r is not None])
         offers = pd.concat([valid, consensus], ignore_index=True)
     else:
         inj = pd.DataFrame()
@@ -126,7 +136,55 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
         best = decide.best_per_market(rows)
         rows["is_best_side"] = rows.set_index(["game_id", "market", "side"]).index.isin(
             best.set_index(["game_id", "market", "side"]).index)
-    return model, coefs, preds, rows, contexts, notes, rejected
+    return model, coefs, preds, rows, contexts, notes, art
+
+
+# ---------------------------------------------------------------- recording
+
+def record(rows, preds, art, settings, now, args, games) -> None:
+    """Snapshot the exact inputs and append every priced side to the forecast history.
+
+    Simulated-time runs (--now) and runs from uncommitted code are never recorded."""
+    version = track.model_version()
+    if args.now or version.endswith("-modified") or version == "unknown":
+        print("Not recorded: simulated time (--now) or uncommitted model code.")
+        return
+    if rows.empty:
+        return
+    run_utc = fmt(now)
+    run_id = run_utc.replace(":", "").replace("-", "") + "_" + version
+    slate = games[games["game_id"].isin(rows["game_id"])]
+    inj = art.get("injury_season")
+    sid, d = store.save_snapshot(
+        run_id,
+        files={"sources.json": ROOT / "data" / "sources.json",
+               "injuries.parquet": ROOT / "data" / f"injuries_{inj}.parquet" if inj else None,
+               "odds_manual.csv": ROOT / "odds_manual.csv", "qb_overrides.csv": ROOT / "qb_overrides.csv",
+               "weather_manual.csv": ROOT / "weather_manual.csv"},
+        frames={"schedule_rows.csv": slate, "offers_raw.csv": art["offers_raw"],
+                "offers_rejected.csv": art["offers_rejected"], "offers_valid.csv": art["offers_valid"],
+                "consensus.csv": art["consensus"], "references.csv": art["references"],
+                "predictions.csv": preds},
+        meta={"run_utc": run_utc, "model_version": version, "settings": vars(settings)})
+    kick = dict(zip(preds["game_id"], preds["kickoff_utc"].map(fmt)))
+    recs = store.record_forecasts(
+        rows.assign(kickoff_utc=rows["game_id"].map(kick),
+                    season=rows["game_id"].map(dict(zip(preds["game_id"], preds["season"]))),
+                    week=rows["game_id"].map(dict(zip(preds["game_id"], preds["week"]))),
+                    away_team=rows["game_id"].map(dict(zip(preds["game_id"], preds["away_team"]))),
+                    home_team=rows["game_id"].map(dict(zip(preds["game_id"], preds["home_team"])))),
+        {"run_utc": run_utc, "run_id": run_id, "model_version": version, "snapshot_id": sid,
+         "horizon_minutes": settings.horizon_minutes})
+    ex = sum(r["data"]["tier"] == "executable" for r in recs)
+    cond = sum(r["data"]["tier"] == "conditional" for r in recs)
+    print(f"Recorded {len(recs)} forecasts ({ex} executable, {cond} conditional) to "
+          f"{store.FORECASTS.relative_to(ROOT)}; inputs in {d.relative_to(ROOT)}")
+    print("Forecast ids for `python run.py place`: first 10 characters of the hash below")
+    for r in recs:
+        if r["data"]["tier"] != "pass":
+            x = r["data"]
+            print(f"  {r['hash'][:10]}  {x['decision']:22s} {x['game_id']} {x['market']} {x['team']} "
+                  f"{'' if x['point'] is None else x['point']} {x['price']:+.0f} @ {x['book']}")
 
 
 # ---------------------------------------------------------------- commands
@@ -143,7 +201,7 @@ def cmd_predict(args):
     cutoff = wk["gameday"].min()
     settings = load_settings(min_edge=args.min_edge, max_odds_age_minutes=args.max_odds_age)
     now = parse_utc(args.now) if args.now else now_utc()
-    model, coefs, preds, rows, contexts, notes, rejected = analyze(
+    model, coefs, preds, rows, contexts, notes, art = analyze(
         games, feat, qbr, wk, cutoff, live, settings, refresh=not args.no_refresh, now=now)
     for n in notes:
         print(f"  ! {n}")
@@ -169,13 +227,8 @@ def cmd_predict(args):
     out.parent.mkdir(exist_ok=True)
     out.write_text(md)
     print(f"Report: {out.relative_to(ROOT)}")
-    if live and (args.now or track.model_version().endswith("-modified")):
-        print("Not logged: simulated time (--now) or uncommitted model code.")
-    elif live:
-        upcoming_ids = set(wk.loc[wk["result"].isna(), "game_id"])
-        log = track.log_predictions(rows[rows["game_id"].isin(upcoming_ids)], preds)
-        print(f"Logged {rows['game_id'].isin(upcoming_ids).sum()} predictions (bets and passes) to "
-              f"{log.relative_to(ROOT)}")
+    if live:
+        record(rows, preds, art, settings, now, args, games)
 
 
 def cmd_recommend(args):
@@ -194,7 +247,7 @@ def cmd_recommend(args):
     live = start >= today
     settings = load_settings(min_edge=args.min_edge, max_odds_age_minutes=args.max_odds_age)
     now = parse_utc(args.now) if args.now else now_utc()
-    model, coefs, preds, rows, contexts, notes, rejected = analyze(
+    model, coefs, preds, rows, contexts, notes, art = analyze(
         games, feat, qbr, day, start, live, settings, refresh=not args.no_refresh, now=now)
     for n in notes:
         print(f"  ! {n}")
@@ -242,11 +295,8 @@ def cmd_recommend(args):
     path.parent.mkdir(exist_ok=True)
     show.to_csv(path, index=False)
     print(f"Saved {path.relative_to(ROOT)}")
-    if live and (args.now or track.model_version().endswith("-modified")):
-        print("Not logged: simulated time (--now) or uncommitted model code.")
-    elif live:
-        log = track.log_predictions(rows, preds)
-        print(f"Logged {len(rows)} predictions to {log.relative_to(ROOT)}")
+    if live:
+        record(rows, preds, art, settings, now, args, games)
 
 
 def cmd_validate(args):
@@ -320,12 +370,40 @@ def cmd_templates(args):
 
 def cmd_grade(args):
     games = load_games(refresh=not args.no_refresh)
-    df = track.grade_log(games)
-    if df is not None:
-        track.report(df)
-        out = ROOT / "logs" / "graded.csv"
-        df.to_csv(out, index=False)
-        print(f"\nDetail: {out.relative_to(ROOT)}")
+    settings = load_settings()
+    for path in (store.FORECASTS, store.LEDGER):
+        ok, msg = store.verify(path)
+        print(f"{path.relative_to(ROOT)}: {msg}")
+        if not ok:
+            raise SystemExit("integrity check failed; not grading")
+    g = track.grade_all(games, settings.horizon_minutes)
+    track.report(g, settings.horizon_minutes)
+    for name, df in g.items():
+        df.to_csv(ROOT / "logs" / f"graded_{name}.csv", index=False)
+
+
+def cmd_place(args):
+    rec = store.place_bet(args.forecast, args.stake, placed_utc=args.placed_utc, price=args.price,
+                          point=args.point, book=args.book, note=args.note or "")
+    d = rec["data"]
+    print(f"Recorded bet {d['bet_id']}: {d['game_id']} {d['market']} {d['team']} "
+          f"{'' if d['point'] is None else d['point']} {d['price']:+.0f} @ {d['book']}, {d['stake_units']}u "
+          f"(forecast said {d['forecast_decision']} at {d['forecast_price']:+.0f})")
+
+
+def cmd_void(args):
+    store.void_bet(args.bet_id, args.reason)
+    print(f"Voided {args.bet_id}")
+
+
+def cmd_verify_log(args):
+    bad = False
+    for path in (store.FORECASTS, store.LEDGER):
+        ok, msg = store.verify(path)
+        bad |= not ok
+        print(f"{path.relative_to(ROOT)}: {'OK' if ok else 'FAILED'} - {msg}")
+    if bad:
+        raise SystemExit(1)
 
 
 def main():
@@ -339,6 +417,16 @@ def main():
     r.add_argument("--all", action="store_true", help="show both sides of every market")
     v = sub.add_parser("validate"); v.add_argument("--from", dest="start", type=int, default=2015)
     sub.add_parser("ratings"); sub.add_parser("grade")
+    pl = sub.add_parser("place", help="record a wager you actually placed")
+    pl.add_argument("--forecast", required=True, help="forecast id (hash prefix) printed by predict")
+    pl.add_argument("--stake", type=float, required=True, help="units staked")
+    pl.add_argument("--price", type=float, help="price you got, if different from the forecast")
+    pl.add_argument("--point", type=float, help="line you got, if different")
+    pl.add_argument("--book"); pl.add_argument("--note")
+    pl.add_argument("--placed-utc", help="when you placed it (ISO-8601 UTC); default now")
+    vo = sub.add_parser("void", help="void a recorded wager (e.g. cancelled by the book)")
+    vo.add_argument("--bet-id", required=True); vo.add_argument("--reason", required=True)
+    sub.add_parser("verify-log", help="check the forecast history and ledger hash chains")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
     t.add_argument("--week", type=int); t.add_argument("--season", type=int)
     for s in sub.choices.values():
@@ -350,7 +438,8 @@ def main():
         s.add_argument("--now", help="evaluate as of this UTC time (ISO-8601 with Z), for reproducible runs")
     args = ap.parse_args()
     {"predict": cmd_predict, "recommend": cmd_recommend, "validate": cmd_validate,
-     "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates}[args.cmd](args)
+     "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates,
+     "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log}[args.cmd](args)
 
 
 if __name__ == "__main__":
