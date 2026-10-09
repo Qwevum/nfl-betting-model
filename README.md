@@ -185,6 +185,14 @@ replay bets except one fall in 2015–2022, so the positive ROI comes from
 reduced-juice prices most bettors can't get. At standard juice it is
 indistinguishable from zero.
 
+**Additional data** (`python run.py experiment --group G1..G4`, protocol and
+results in `docs/EXPERIMENTS.md`):
+* G1 rushing efficiency, G2 neutral-situation pace, G3 snap-weighted player
+  availability and G4 offensive-line continuity were each tested against the
+  unchanged baseline under a pre-registered protocol.
+* None improved out-of-sample probabilities on the 2015–2021 development
+  seasons. None was evaluated on the holdout, and none is used live.
+
 ## Forecast history, snapshots and the bet ledger
 
 * **`logs/forecasts.jsonl`**: every side of every market priced by a live run
