@@ -108,3 +108,60 @@ applied to every game of that team.
 **Measured effect:** none on model accuracy, and none expected; this changes
 which quotes may be used. The run also exposed the next problem: one fresh quote
 at MIA +8 became a "BET" against the untimed Oct 7 consensus reference.
+
+## 2. Market reference from contemporaneous two-sided quotes, leave-one-book-out
+
+**Problem:** audit issue 1. The market probability that anchors every estimate
+came from the untimed nflverse consensus, even when fresh bookmaker quotes were
+available. One quote could also define its own "market".
+
+**Files:**
+* new: `nflmodel/market.py`, `tests/test_market.py`
+* changed: `nflmodel/decide.py`, `nflmodel/report.py`, `run.py`, `README.md`
+
+**Change:**
+* `analyze()` now runs in order:
+  1. fetch quotes
+  2. validate them (change 1)
+  3. build references from valid quotes only
+  4. set the slate's market lines from the references
+  5. predict and price
+* **Pairs:** a book's latest quote for each side, at the same line, with both
+  sides quoted within 5 minutes of each other.
+* **Vig removal:** proportional normalization.
+* **Different lines:** each book's no-vig probability at its line is inverted
+  through the key-number distribution into an implied mean (`mu`). The
+  reference is the median `mu` across books, and the reference line is the
+  median quoted line. Moneylines use the median of the logit probability.
+* **Self-reference:** each offer is priced against a reference that excludes
+  its own book and needs `min_reference_books` other books. Without one, the
+  decision is at most "BET IF PRICE AVAILABLE".
+* When live quotes exist, untimed consensus lines are not offers.
+* Every decision shows the reference it used: number of books, quote times and
+  dispersion.
+
+**Verification:**
+* 9 new tests cover:
+  * vig removal at −110/−110
+  * three books at different lines recovering the same mean within 0.15 pts
+  * the evaluated book excluded from its reference
+  * the median resisting an outlier book
+  * no reference when too few other books remain
+  * one-sided quotes 10 minutes apart not paired
+  * the latest quote superseding an older one
+  * stale quotes never reaching the reference
+  * moneyline median-logit with an outlier
+
+  The suite passes: 33 tests.
+* Historical path unchanged: `validate --no-refresh` regenerates
+  `reports/validation.md` byte-identically.
+* Replay at 2026-10-11T12:30Z with 3 books two-sided on PHI @ JAX and one
+  one-sided quote on CIN @ MIA:
+  * the CIN @ MIA quote went from **BET** (change 1) to **BET IF PRICE
+    AVAILABLE**, because there is no live reference without its own book
+  * PHI +8 at book C is priced against books A and B only (EV +0.9%, no bet)
+
+**Measured effect on accuracy:** none measurable. There are no historical
+multi-book snapshots to evaluate the reference against (see change 5). Untested
+in this sandbox: the reference built from real Odds API data, because the API
+is blocked here.

@@ -58,7 +58,22 @@ rejected if:
 * it was quoted at or after kickoff, or the run itself is at or after kickoff
 * its price, line or market/side is invalid
 
-Games that have started are skipped. `--now 2026-10-11T15:00:00Z` replays a run
+Games that have started are skipped.
+
+**Market reference.** The market's probability for each bet is built from the
+validated quotes in four steps:
+1. **Pairing.** Each book's two sides must be at the same line and quoted within
+   5 minutes of each other.
+2. **Vig removal.** Proportional: the two sides are scaled to sum to 100%.
+3. **Different lines.** Each book's probability at its own line is converted
+   into an implied mean margin or total using the key-number outcome
+   distribution, so +3 and +3.5 quotes become comparable.
+4. **Median across books.** The reference is the median, and the evaluated
+   book is left out of its own reference.
+
+At least `min_reference_books` (default 2) *other* books are needed. Otherwise
+the bet can only be "BET IF PRICE AVAILABLE", and the untimed nflverse
+consensus is used as a fallback. `--now 2026-10-11T15:00:00Z` replays a run
 at a fixed time; such runs, and runs from uncommitted code, write to `reports/dev/`
 and are never logged.
 

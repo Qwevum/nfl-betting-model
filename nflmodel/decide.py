@@ -26,8 +26,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from .market import _invert
 from .model import FittedModel, novig_first
-from .odds import decimal, ev, implied_probability, kelly, no_vig
+from .odds import ev, implied_probability, kelly
 
 MIN_EDGE = 0.02
 GAP_POINTS = 4.0
@@ -187,20 +188,52 @@ class GamePricer:
     distribution supplies the difference in probability, including pushes.
     """
 
-    def __init__(self, model: FittedModel, g, key_numbers: bool = True):
+    def __init__(self, model: FittedModel, g, key_numbers: bool = True, refs: dict | None = None):
+        """refs: {market: market.Reference} built from live quotes (leave-one-book-out).
+        Markets without a live reference fall back to the untimed nflverse consensus in g."""
         self.m, self.g = model, g
         self.mdist, self.tdist = model.margin_dist, model.total_dist
         if not key_numbers:
             self.mdist = copy.copy(self.mdist); self.mdist.w = np.ones_like(self.mdist.w)
             self.tdist = copy.copy(self.tdist); self.tdist.w = np.ones_like(self.tdist.w)
+        refs = refs or {}
+        self.refs = refs
         self.edge_m = (g.blend_margin - g.spread_line) if pd.notna(g.blend_margin) else 0.0
         self.edge_t = (g.blend_total - g.total_line) if pd.notna(g.blend_total) else 0.0
         self.has_spread_mkt = pd.notna(g.spread_line)
         self.has_total_mkt = pd.notna(g.total_line)
-        self.has_ml_mkt = pd.notna(g.home_moneyline) and pd.notna(g.away_moneyline)
-        self.p_spread_mkt = float(novig_first(g.home_spread_odds, g.away_spread_odds)) if self.has_spread_mkt else np.nan
-        self.p_total_mkt = float(novig_first(g.over_odds, g.under_odds)) if self.has_total_mkt else np.nan
-        self.p_ml_mkt = float(novig_first(g.home_moneyline, g.away_moneyline)) if self.has_ml_mkt else np.nan
+        if refs.get("spread") is not None and self.has_spread_mkt:
+            self.p_spread_mkt = self._cond_over(model.margin_dist, refs["spread"].mu, g.spread_line)[0]
+        else:
+            self.p_spread_mkt = float(novig_first(g.home_spread_odds, g.away_spread_odds)) if self.has_spread_mkt else np.nan
+        if refs.get("total") is not None and self.has_total_mkt:
+            self.p_total_mkt = self._cond_over(model.total_dist, refs["total"].mu, g.total_line)[0]
+        else:
+            self.p_total_mkt = float(novig_first(g.over_odds, g.under_odds)) if self.has_total_mkt else np.nan
+        if refs.get("ml") is not None:
+            self.has_ml_mkt, self.p_ml_mkt = True, refs["ml"].p
+        else:
+            self.has_ml_mkt = pd.notna(g.home_moneyline) and pd.notna(g.away_moneyline)
+            self.p_ml_mkt = float(novig_first(g.home_moneyline, g.away_moneyline)) if self.has_ml_mkt else np.nan
+
+    def reference_prob(self, market: str, side: str, point) -> float:
+        """The market's own no-vig probability for this exact bet (no model input), or NaN."""
+        if market == "ml":
+            p = self.p_ml_mkt
+            return p if side == "home" else 1 - p
+        dist = self.m.margin_dist if market == "spread" else self.m.total_dist
+        ref = self.refs.get(market)
+        if ref is not None:
+            mu = ref.mu
+        else:
+            line = self.g.spread_line if market == "spread" else self.g.total_line
+            p_line = self.p_spread_mkt if market == "spread" else self.p_total_mkt
+            if pd.isna(line):
+                return np.nan
+            mu = _invert(dist, line, p_line, *((-60, 60) if market == "spread" else (5, 125)))
+        t = (-point if side == "home" else point) if market == "spread" else point
+        cond, _ = self._cond_over(dist, mu, t)
+        return cond if side in ("home", "over") else 1 - cond
 
     @staticmethod
     def _cond_over(dist, mu, t):
@@ -251,41 +284,43 @@ def price_for_edge(p_win: float, p_push: float, edge: float) -> float | None:
     return round(b * 100) if b >= 1 else round(-100 / b)
 
 
-def _market_prob(offers: pd.DataFrame, market: str, side: str, point) -> tuple[float, str]:
-    """No-vig market probability from a two-sided price at one book (prefer consensus)."""
-    other = {"home": "away", "away": "home", "over": "under", "under": "over"}[side]
-    for book in ["consensus"] + [b for b in offers["book"].unique() if b != "consensus"]:
-        o = offers[(offers["book"] == book) & (offers["market"] == market)]
-        mine, theirs = o[o["side"] == side], o[o["side"] == other]
-        if market == "spread":
-            mine = mine[mine["point"] == point]; theirs = theirs[theirs["point"] == -point]
-        elif market == "total":
-            mine = mine[mine["point"] == point]; theirs = theirs[theirs["point"] == point]
-        if len(mine) and len(theirs):
-            return no_vig(mine["price"].iloc[0], theirs["price"].iloc[0])[0], book
-    return np.nan, ""
-
-
 # ---------------------------------------------------------------- decisions
 
 def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
-                min_edge: float = MIN_EDGE) -> list[dict]:
-    """One record per market and side, best available price for that side."""
+                min_edge: float = MIN_EDGE, refs: dict | None = None, min_ref_books: int = 2) -> list[dict]:
+    """One record per market and side, best available price for that side.
+
+    refs: {(market, excluded_book): Reference|None} from market.references_for_game.
+    Each offer is priced against the reference built WITHOUT its own book. Without
+    refs (historical replay) the untimed consensus in `g` is the reference.
+    """
     rows = []
-    pricer, plain = GamePricer(model, g), GamePricer(model, g, key_numbers=False)
+    pricers: dict = {}
+
+    def pricer_for(book, plain=False):
+        key = (book, plain)
+        if key not in pricers:
+            r = {m: refs.get((m, book)) for m in ("spread", "ml", "total")} if refs else None
+            pricers[key] = GamePricer(model, g, key_numbers=not plain, refs=r)
+        return pricers[key]
+
     for (market, side), o in offers.groupby(["market", "side"]):
         o = o.dropna(subset=["price"])
         if market != "ml":
             o = o.dropna(subset=["point"])
+        if refs is not None and (o["source"] != "consensus").any():
+            o = o[o["source"] != "consensus"]   # live quotes exist: untimed consensus is not an offer
         if o.empty:
             continue
         scored = []
         for r in o.itertuples(index=False):
-            pw, pp = pricer.probs(market, side, r.point)
+            pw, pp = pricer_for(r.book).probs(market, side, r.point)
             scored.append((ev(pw, pp, r.price), r, pw, pp))
         e, best, pw, pp = max(scored, key=lambda x: x[0])
         point = best.point
         d = _against(market, side)
+        pricer, plain = pricer_for(best.book), pricer_for(best.book, plain=True)
+        ref = refs.get((market, best.book)) if refs else None
 
         def ev_at(**kw):
             a, b = (plain if kw.pop("plain", False) else pricer).probs(market, side, point, **kw)
@@ -299,7 +334,15 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
             "double model weight": ev_at(edge_mult=2.0),
             "no key-number shape": ev_at(plain=True),
         }
-        mkt_p, mkt_book = _market_prob(offers, market, side, point)
+        mkt_p = pricer.reference_prob(market, side, point)
+        if ref is not None:
+            ref_desc = (f"live: {ref.n_books} other books ({', '.join(ref.books)}), quotes "
+                        f"{ref.oldest_utc:%H:%M}-{ref.newest_utc:%H:%M}Z, spread across books "
+                        f"{ref.spread_of_books:.2f}{' pts' if market != 'ml' else ''}")
+        elif refs is not None:
+            ref_desc = f"no live reference (fewer than {min_ref_books} other books with two-sided quotes); untimed consensus used"
+        else:
+            ref_desc = "nflverse consensus (untimed)"
         decided = 1 - pp
         rec = {
             "game_id": g.game_id, "market": market, "side": side,
@@ -312,7 +355,8 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
                 f"{r.book} {'' if pd.isna(r.point) else f'{r.point:+g} ' if market == 'spread' else f'{r.point:g} '}{int(r.price):+d}"
                 for r in o.itertuples(index=False))),
             "p_win": pw, "p_push": pp, "model_prob": pw / decided if decided > 0 else np.nan,
-            "implied": implied_probability(best.price), "market_prob": mkt_p, "market_prob_book": mkt_book,
+            "implied": implied_probability(best.price), "market_prob": mkt_p, "reference": ref_desc,
+            "reference_live": ref is not None,
             "ev": e, "kelly": kelly(pw, pp, best.price),
             "min_price": price_for_edge(pw, pp, min_edge),
             **{f"ev[{k}]": v for k, v in sens.items()},
@@ -325,11 +369,13 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext,
         reasons += ctx.block.get(market, [])
         if reasons:
             rec["decision"] = "NO BET"
-        elif rec["price_source"] in BOOK_SOURCES_WITH_TIME:
+        elif rec["price_source"] in BOOK_SOURCES_WITH_TIME and ref is not None:
             rec["decision"] = "BET"
         else:
             rec["decision"] = "BET IF PRICE AVAILABLE"
-            reasons.append("only a consensus price was seen; confirm at your book "
+            why = ("only an untimed consensus price was seen" if rec["price_source"] not in BOOK_SOURCES_WITH_TIME
+                   else "no live market reference without this book")
+            reasons.append(f"{why}; confirm at your book "
                            f"(still +{min_edge:.0%} EV at {_fmt_price(rec['min_price'])} or better at this line)")
         rec["reasons"] = " | ".join(reasons)
         rec["stake_units"] = (round(min(rec["kelly"] * KELLY_FRACTION * 100, MAX_STAKE_UNITS), 2)

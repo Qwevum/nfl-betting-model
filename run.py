@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from nflmodel import decide, inputs, report, track, validate
+from nflmodel import decide, inputs, market, report, track, validate
 from nflmodel.config import load_settings
 from nflmodel.timeutil import fmt, kickoff_utc, now_utc, parse_utc
 from nflmodel.backtest import grade as grade_bet, profit
@@ -79,21 +79,35 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
         notes += n1 + n2
         day = inputs.apply_qb_overrides(day, overrides, games, qbr)
         day = inputs.apply_weather(day, weather)
-    preds = model.predict(day)
 
+    refs_by_game: dict = {}
     if live:
         inj = load_injuries(int(day["season"].iloc[0]), refresh=refresh)
         print("Gathering odds ...")
         books, consensus, n3 = gather_offers(day, inputs.kickoff_map(day), settings)
         notes += n3
+        # 1) validate quotes, 2) build the market reference from valid quotes, 3) predict
         valid, rejected = validate_offers(books, inputs.kickoff_map(day), now, settings)
         if len(rejected):
             notes.append(f"{len(rejected)} bookmaker quote(s) rejected before price selection "
                          f"({rejected['reject_reason'].str.split(':').str[0].value_counts().to_dict()})")
-        offers = pd.concat([valid.drop(columns="odds_time_utc"), consensus], ignore_index=True)
+        day = day.copy()
+        day["reference_kind"] = "nflverse consensus (untimed)"
+        for gid, o in valid.groupby("game_id"):
+            refs = market.references_for_game(o, model, settings.min_reference_books)
+            refs_by_game[gid] = refs
+            m = day["game_id"] == gid
+            if refs[("spread", None)] is not None:
+                day.loc[m, "spread_line"] = refs[("spread", None)].line
+            if refs[("total", None)] is not None:
+                day.loc[m, "total_line"] = refs[("total", None)].line
+            if any(refs[(mk, None)] is not None for mk in ("spread", "ml", "total")):
+                day.loc[m, "reference_kind"] = "live bookmaker quotes"
+        offers = pd.concat([valid, consensus], ignore_index=True)
     else:
         inj = pd.DataFrame()
         offers = consensus_offers(day)
+    preds = model.predict(day)
 
     rows, contexts = [], {}
     for g in preds.itertuples(index=False):
@@ -104,7 +118,9 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
             if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= settings.gap_points:
                 ctx.block["spread"].append("model vs market gap"); ctx.block["ml"].append("model vs market gap")
         contexts[g.game_id] = ctx
-        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings.min_edge)
+        refs = refs_by_game.get(g.game_id, {}) if live else None
+        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings.min_edge,
+                                   refs=refs, min_ref_books=settings.min_reference_books)
     rows = pd.DataFrame(rows)
     if len(rows):
         best = decide.best_per_market(rows)

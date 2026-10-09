@@ -68,6 +68,8 @@ def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model) ->
                      f"(quarter Kelly); still +EV at {_fmt_price(r['min_price'])} or better")
         line += f". {r['reasons'] or 'All checks passed.'}"
         out.append(line)
+        if "reference" in r and isinstance(r["reference"], str):
+            out.append(f"  - Market reference: {r['reference']}")
         if r["decision"] != "NO BET" and r["risks"]:
             out.append(f"  - Could be wrong because: {r['risks']}")
         sens = {k[3:-1]: v for k, v in r.items() if k.startswith("ev[")}
