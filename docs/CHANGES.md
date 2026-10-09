@@ -750,3 +750,65 @@ the reference later and to audit a decision.
 * the snapshot frame round-trips
 
 The suite passes: 105 tests.
+
+## 17. Revalidate the whole market reference at completion, and re-price
+
+**Problem:** the completion check (change 11) rechecked only the selected
+offer's age.
+
+Reproduction:
+* maximum quote age 30 min
+* comparison books quoted 29 min before collection
+* prediction finished 2 min later
+
+The selected offer was still fresh, but the reference rested on 31-minute-old
+quotes, and the recommendation stayed BET.
+
+**Files:**
+* new: `nflmodel/pricing.py`, `tests/test_reference_revalidation.py`
+* changed: `nflmodel/runtime.py`, `run.py`, `README.md`
+
+**Change:**
+* `pricing.price_slate(model, day, valid, consensus, settings, context_fn)`
+  computes everything that depends on the quotes, from the given valid set
+  alone:
+  * references
+  * slate lines
+  * predictions
+  * contexts
+  * decisions (probabilities, EV, sensitivity, stakes)
+* `runtime.finalize()` prices the slate, then at completion revalidates **every
+  raw quote** against the completion time.
+  * If the valid set changed (a comparison quote or one side of a pair
+    expired, or kickoff passed), the slate is re-priced from scratch with the
+    remaining quotes. This repeats up to 2 times.
+  * Nothing from an expired reference is kept.
+* `recheck_before_issue()` gains a reference check: an executable bet whose
+  `reference_oldest_utc` is older than `max_odds_age_minutes` at the final time
+  is downgraded to "BET IF PRICE AVAILABLE" ("market reference quotes expired
+  …; EV is not current"). This is the conservative fallback if re-pricing
+  cannot settle.
+* Kickoff is rechecked last: started games become NO BET and are not recorded.
+* The report, recorded forecasts and the snapshot (`references.csv`,
+  `offers_valid_final.csv`) all use the final pricing.
+  `references_at_collection.csv` and the re-price summary in `meta.json` keep
+  the audit trail.
+
+**Verification:** 8 new tests through the real `finalize → price_slate →
+decide_game` path, with a synthetic market-only model and a step clock:
+1. **Your reproduction:** BET at collection becomes "BET IF PRICE AVAILABLE"
+   with "no live market reference". 4 quotes expired, 1 re-price.
+2. **One side of a pair expiring** removes that book from the reference.
+3. **The rebuild** keeps the evaluated book excluded, and recomputes market
+   probability, win probability, EV, Kelly and sensitivity. The stake equals
+   the new Kelly stake, and the decision remains BET only because it is still
+   +EV against the rebuilt reference.
+4. **Insufficient remaining books** gives an explicit downgrade.
+5. **The safeguard** with re-pricing disabled downgrades with "market reference
+   quotes expired".
+6. **Stable quotes** keep BET with no re-price.
+7. **Kickoff crossing during processing** gives NO BET, `post_kickoff` and a
+   zero stake.
+8. **No offers left** gives empty rows without error.
+
+The suite passes: 113 tests. A replay with three manual books runs end to end.

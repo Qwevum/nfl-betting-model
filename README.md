@@ -81,6 +81,21 @@ consensus is used as a fallback. `--now 2026-10-11T15:00:00Z` replays a run
 at a fixed time; such runs, and runs from uncommitted code, write to `reports/dev/`
 and are never logged.
 
+**Completion check.** When predictions finish, **all** quotes are revalidated:
+the selected offers and every quote inside each market reference, on both
+sides of each pair.
+* If any quote has expired, the slate is re-priced from the quotes still valid.
+  References are rebuilt with the same pairing and leave-one-book-out rules,
+  and probabilities, EV, sensitivity, decisions and stakes are recomputed, up
+  to 2 times.
+* If fewer than `min_reference_books` other books remain, the bet becomes
+  "BET IF PRICE AVAILABLE" with the reason stated.
+* A final safeguard downgrades any executable bet whose selected or reference
+  quote is still stale, and drops games that have kicked off. If re-pricing
+  can't settle, the result is conservative, never a stale-reference BET.
+* The report, recorded forecasts and snapshot use the final pricing. The
+  snapshot also keeps `references_at_collection.csv` for audit.
+
 ## Weather
 
 * **Not a model input.** Wind and temperature are not features: observed

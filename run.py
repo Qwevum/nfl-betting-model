@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from nflmodel import decide, inputs, market, report, runtime, store, track, validate
+from nflmodel import decide, inputs, pricing, report, runtime, store, track, validate
 from nflmodel.config import load_settings
 from nflmodel.timeutil import fmt, kickoff_utc, now_utc, parse_utc
 from nflmodel.backtest import grade as grade_bet, profit
@@ -97,69 +97,74 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
         # Weather is NOT applied to the model: wind/temperature are not features. A valid
         # forecast only lifts the "no outdoor total without a forecast" rule (decide.py).
 
-    refs_by_game: dict = {}
-    if live:
-        inj = load_injuries(int(day["season"].iloc[0]), refresh=refresh)
-        clock.stamp("injuries_retrieved")
-        print("Gathering odds ...")
-        books, consensus, n3 = gather_offers(day, inputs.kickoff_map(day), settings)
-        collected = clock.stamp("odds_collected")   # quotes are validated against the time they were fetched
-        notes += n3
-        # 1) validate quotes, 2) build the market reference from valid quotes, 3) predict
-        valid, rejected = validate_offers(books, inputs.kickoff_map(day), collected, settings)
-        art.update(offers_raw=books, offers_rejected=rejected, offers_valid=valid, consensus=consensus,
-                   injury_season=int(day["season"].iloc[0]))
-        if len(rejected):
-            notes.append(f"{len(rejected)} bookmaker quote(s) rejected before price selection "
-                         f"({rejected['reject_reason'].str.split(':').str[0].value_counts().to_dict()})")
-        day = day.copy()
-        day["reference_kind"] = "nflverse consensus (untimed)"
-        for gid, o in valid.groupby("game_id"):
-            refs = market.references_for_game(o, model, settings.min_reference_books)
-            refs_by_game[gid] = refs
-            m = day["game_id"] == gid
-            if refs[("spread", None)] is not None:
-                day.loc[m, "spread_line"] = refs[("spread", None)].line
-            if refs[("total", None)] is not None:
-                day.loc[m, "total_line"] = refs[("total", None)].line
-            if any(refs[(mk, None)] is not None for mk in ("spread", "ml", "total")):
-                day.loc[m, "reference_kind"] = "live bookmaker quotes"
-        art["references"] = market.references_frame(refs_by_game)
-        offers = pd.concat([valid, consensus], ignore_index=True)
-    else:
-        inj = pd.DataFrame()
+    if not live:
+        # historical replay: untimed consensus only; only rules applicable from data available then
+        preds = model.predict(day)
         offers = consensus_offers(day)
-    preds = model.predict(day)
-
-    rows, contexts = [], {}
-    for g in preds.itertuples(index=False):
-        if live:
-            ctx = decide.build_context(g, inj, SOURCES, coefs, model.k_spread, overrides, weather, settings)
-            rej = art["inputs_rejected"]
-            for x in rej[rej["game_id"] == g.game_id].itertuples(index=False):
-                ctx.missing.append(f"{x.file} row rejected and NOT applied"
-                                   f"{' (' + x.team + ')' if isinstance(x.team, str) else ''}: {x.reason}")
-        else:  # historical: only the rules that can be applied from data available then
+        rows, contexts = [], {}
+        for g in preds.itertuples(index=False):
             ctx = decide.GameContext()
             if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= settings.gap_points:
                 ctx.block["spread"].append("model vs market gap"); ctx.block["ml"].append("model vs market gap")
-        contexts[g.game_id] = ctx
-        refs = refs_by_game.get(g.game_id, {}) if live else None
-        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings, refs=refs)
-    rows = pd.DataFrame(rows)
+            contexts[g.game_id] = ctx
+            rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings, refs=None)
+        rows = pd.DataFrame(rows)
+        if len(rows):
+            best = decide.best_per_market(rows)
+            rows["is_best_side"] = rows.set_index(["game_id", "market", "side"]).index.isin(
+                best.set_index(["game_id", "market", "side"]).index)
+        clock.stamp("prediction_completed")
+        art["timeline"] = clock.as_dict()
+        return model, coefs, preds, rows, contexts, notes, art
+
+    inj = load_injuries(int(day["season"].iloc[0]), refresh=refresh)
+    clock.stamp("injuries_retrieved")
+    print("Gathering odds ...")
+    kick = inputs.kickoff_map(day)
+    books, consensus, n3 = gather_offers(day, kick, settings)
+    collected = clock.stamp("odds_collected")   # quotes are validated against the time they were fetched
+    notes += n3
+    # 1) validate quotes, 2) build references from valid quotes, 3) predict and decide
+    valid, rejected = validate_offers(books, kick, collected, settings)
+    art.update(offers_raw=books, offers_rejected=rejected, offers_valid=valid, consensus=consensus,
+               injury_season=int(day["season"].iloc[0]))
+    if len(rejected):
+        notes.append(f"{len(rejected)} bookmaker quote(s) rejected before price selection "
+                     f"({rejected['reject_reason'].str.split(':').str[0].value_counts().to_dict()})")
+
+    def context_fn(g):
+        ctx = decide.build_context(g, inj, SOURCES, coefs, model.k_spread, overrides, weather, settings)
+        rej = art["inputs_rejected"]
+        for x in rej[rej["game_id"] == g.game_id].itertuples(index=False):
+            ctx.missing.append(f"{x.file} row rejected and NOT applied"
+                               f"{' (' + x.team + ')' if isinstance(x.team, str) else ''}: {x.reason}")
+        return ctx
+
+    first = {}
+
+    def price(v):
+        p = pricing.price_slate(model, day, v, consensus, settings, context_fn)
+        first.setdefault("references", p.references)
+        return p
+
+    # price, then revalidate EVERY quote (selected offers and reference quotes) at completion
+    # and re-price from the quotes still valid; finally downgrade anything stale or post-kickoff
+    priced, info = runtime.finalize(price, books, kick, clock, settings, valid)
+    if info["repriced"]:
+        notes.append(f"{info['expired_quotes']} quote(s) expired while the run was processing; the slate was "
+                     f"re-priced {info['repriced']} time(s) from the quotes still valid at completion")
+    if not info["stable"]:
+        notes.append("quotes kept expiring during re-pricing; executable bets relying on any stale quote were "
+                     "downgraded to conditional")
+    art.update(references=priced.references, references_at_collection=first.get("references"),
+               offers_valid_final=priced.valid, reprice=info)
+    rows = priced.rows
     if len(rows):
-        best = decide.best_per_market(rows)
-        rows["is_best_side"] = rows.set_index(["game_id", "market", "side"]).index.isin(
-            best.set_index(["game_id", "market", "side"]).index)
-    completed = clock.stamp("prediction_completed")
-    if live and len(rows):
-        # recheck quote freshness and kickoff at completion, before anything is issued
-        rows = runtime.recheck_before_issue(rows, inputs.kickoff_map(day), completed, settings)
         n_late = int(rows["post_kickoff"].sum())
         if n_late:
             notes.append(f"{n_late} side(s) dropped: kickoff passed before the run completed")
     art["timeline"] = clock.as_dict()
-    return model, coefs, preds, rows, contexts, notes, art
+    return model, coefs, priced.preds, rows, priced.contexts, notes, art
 
 
 # ---------------------------------------------------------------- recording
@@ -193,9 +198,11 @@ def record(rows, preds, art, settings, clock, args, games) -> None:
         frames={"schedule_rows.csv": slate, "offers_raw.csv": art["offers_raw"],
                 "offers_rejected.csv": art["offers_rejected"], "offers_valid.csv": art["offers_valid"],
                 "consensus.csv": art["consensus"], "references.csv": art["references"],
+                "references_at_collection.csv": art.get("references_at_collection"),
+                "offers_valid_final.csv": art.get("offers_valid_final"),
                 "inputs_rejected.csv": art["inputs_rejected"], "qb_accepted.csv": art["qb_accepted"],
                 "weather_accepted.csv": art["weather_accepted"], "predictions.csv": preds},
-        meta={"model_version": version, "settings": vars(settings), **timeline})
+        meta={"model_version": version, "settings": vars(settings), "reprice": art.get("reprice"), **timeline})
     kick = dict(zip(preds["game_id"], preds["kickoff_utc"].map(fmt)))
     recs = store.record_forecasts(
         rows.assign(kickoff_utc=rows["game_id"].map(kick),
