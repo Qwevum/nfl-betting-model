@@ -694,3 +694,28 @@ unverified provider plan detail ("free tier").
 
 No accuracy or profitability claim follows from changes 8–14; they are
 reliability fixes.
+
+---
+
+# Third review
+
+## 15. Python 3.11+ required, consistently
+
+**Problem:** the README said "Python 3.10+", but `nflmodel/config.py` imports
+the standard-library `tomllib`, which was added in Python 3.11. On 3.10 the
+project failed at import.
+
+**Decision:** require 3.11+. That is the simplest option consistent with the
+environment where the project was developed and tested (Python 3.11.15). It
+avoids a second TOML dependency path.
+
+**Files:** `nflmodel/__init__.py` (import-time check with a clear message),
+`requirements.txt` (states the requirement), `README.md`,
+`tests/test_python_version.py` (new).
+
+**Verification:** 3 new tests:
+* the running interpreter meets `MIN_PYTHON = (3, 11)`
+* the README and requirements say 3.11+, and nothing says 3.10
+* `tomllib` is the TOML reader
+
+The suite passes: 104 tests.

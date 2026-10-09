@@ -9,7 +9,7 @@ logged before kickoff and graded afterwards.
 ## Setup
 
 ```bash
-pip install -r requirements.txt       # Python 3.10+
+pip install -r requirements.txt       # requires Python 3.11+ (uses tomllib)
 python -m unittest discover tests     # 58 regression tests
 ```
 
