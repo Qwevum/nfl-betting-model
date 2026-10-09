@@ -91,6 +91,28 @@ def format_summary(s: dict, min_reference_books: int) -> str:
     return "\n".join(lines)
 
 
+def compare_books(valid: pd.DataFrame, actionable: set[str] | None = None) -> pd.DataFrame:
+    """Per game/market/side: every book's line and price, the best price, and whether
+    each book is actionable for you (actionable empty = all books) or reference-only."""
+    actionable = actionable or set()
+    rows = []
+    if valid.empty:
+        return pd.DataFrame(columns=["game_id", "market", "side", "books", "lines", "best", "worst", "quotes"])
+    for (gid, market, side), g in valid.groupby(["game_id", "market", "side"]):
+        g = g.sort_values("price", ascending=False)
+        def tag(b):
+            return "" if not actionable or b.lower() in actionable else " (ref only)"
+        q = [f"{r.book}{tag(r.book)} {'' if pd.isna(r.point) else f'{r.point:+g} '}{int(r.price):+d}"
+             for r in g.itertuples(index=False)]
+        mine = g[g["book"].str.lower().isin(actionable)] if actionable else g
+        top = mine.iloc[0] if len(mine) else None
+        rows.append({"game_id": gid, "market": market, "side": side, "books": int(g["book"].nunique()),
+                     "lines": ",".join(f"{x:g}" for x in sorted(g["point"].dropna().unique())) or "-",
+                     "best": (f"{top.book} {int(top.price):+d}" if top is not None else "no actionable book"),
+                     "worst": f"{g.iloc[-1].book} {int(g.iloc[-1].price):+d}", "quotes": "; ".join(q)})
+    return pd.DataFrame(rows)
+
+
 def describe_failure(exc: Exception) -> str:
     msg = redact(exc)
     if "403" in msg or "Tunnel" in msg or "CONNECT" in msg:
@@ -102,4 +124,4 @@ def describe_failure(exc: Exception) -> str:
     return f"request failed: {msg}"
 
 
-__all__ = ["SETUP", "key_status", "redact", "quota_line", "summarize", "format_summary", "describe_failure", "np"]
+__all__ = ["SETUP", "key_status", "redact", "quota_line", "compare_books", "summarize", "format_summary", "describe_failure", "np"]

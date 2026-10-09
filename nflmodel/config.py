@@ -12,6 +12,7 @@ silently change how bets are sized or filtered.
 from __future__ import annotations
 
 import math
+import re
 import tomllib
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
@@ -46,6 +47,18 @@ class Settings:
     # The Odds API: bookmaker regions per request. Cost = 3 markets x number of regions
     # credits per request, so "us" (3 credits) suits the free plan; "us,us2" adds books.
     odds_api_regions: str = "us"
+    # Probability used for decisions:
+    #   "model"  - the ex-book market reference at the exact line, moved only by the model's
+    #              calibrated edge (offset calibration: market log-odds kept with weight 1)
+    #   "market" - the ex-book market reference alone (price shopping baseline)
+    #   "legacy" - the pre-2026-10 calibration (free intercept and slope on the market's
+    #              log-odds); kept only as the comparison baseline
+    probability_model: str = "model"
+    # Sportsbooks you can actually bet at (Odds API bookmaker keys, comma-separated, e.g.
+    # "draftkings,fanduel"). Every book still contributes to market references; only these
+    # are actionable. Empty = every book counts as actionable (the report says so).
+    actionable_books: str = ""
+    watchlist_size: int = 10               # closest non-actionable candidates shown in the watchlist
 
     def __post_init__(self):
         validate_settings(self)
@@ -71,7 +84,16 @@ _RULES = [
     ("gap_points", float, 0, False, 60, True),
     ("kelly_fraction", float, 0, False, 1, True),
     ("max_stake_units", float, 0, False, 100, True),
+    ("watchlist_size", int, 0, True, 200, True),
 ]
+
+PROBABILITY_MODELS = {"model", "market", "legacy"}
+_BOOK_KEY = re.compile(r"^[a-z0-9_]+$")
+
+
+def actionable_set(settings) -> set[str]:
+    """Books the user can bet at; empty set = all books."""
+    return {b.strip().lower() for b in settings.actionable_books.split(",") if b.strip()}
 
 
 def validate_settings(s: Settings) -> None:
@@ -94,6 +116,14 @@ def validate_settings(s: Settings) -> None:
     if not regions or any(r.strip() not in ODDS_API_REGIONS for r in regions):
         errors.append(f"odds_api_regions must be a comma-separated subset of {sorted(ODDS_API_REGIONS)}, "
                       f"got {s.odds_api_regions!r}")
+    if s.probability_model not in PROBABILITY_MODELS:
+        errors.append(f"probability_model must be one of {sorted(PROBABILITY_MODELS)}, got {s.probability_model!r}")
+    if not isinstance(s.actionable_books, str):
+        errors.append(f"actionable_books must be a comma-separated string, got {s.actionable_books!r}")
+    else:
+        bad = [b for b in (x.strip().lower() for x in s.actionable_books.split(",")) if b and not _BOOK_KEY.match(b)]
+        if bad:
+            errors.append(f"actionable_books has invalid bookmaker keys {bad} (use Odds API keys like draftkings)")
     if not errors and s.clock_skew_minutes >= s.max_odds_age_minutes:
         errors.append("clock_skew_minutes must be smaller than max_odds_age_minutes")
     if errors:

@@ -250,17 +250,27 @@ def cmd_predict(args):
         raise SystemExit("No odds available for these games yet.")
     save_sources()
 
+    from nflmodel import diagnose
+    rows["category"] = diagnose.categorize(rows, settings)
     best = rows[rows["is_best_side"]]
-    print(f"\n=== {season} Week {week} ===  model {track.model_version()}  |  "
-          f"flag: EV > {settings.min_edge:.1%} and robust to a 0.5-pt error; stakes "
+    print(f"\n=== {season} Week {week} ===  model {track.model_version()}  |  probability model "
+          f"{settings.probability_model}  |  EV > {settings.min_edge:.1%} and robust to a 0.5-pt error; stakes "
           f"{settings.kelly_fraction:g}x Kelly capped at {settings.max_stake_units:g}u; gap rule {settings.gap_points:g} pts\n")
-    print(report.terminal_summary(best, preds))
-    n_bet = (best["decision"] != "NO BET").sum()
-    print(f"\n{n_bet} bet(s) of {len(best)} markets. Full reasoning per game in the report.")
+    print(report.terminal_actionable(rows, preds))
+    print()
+    watch = diagnose.watchlist(rows, settings)
+    print(report.terminal_watchlist(watch, preds))
+    fun = diagnose.funnel(best, settings)
+    print("\nWhy (best side per market): " + "; ".join(f"{r.stage} {r.remaining}" for r in fun.itertuples()))
+    print(f"Primary cause: {diagnose.primary_cause(rows, settings)}.")
+    n_bet = int((rows["decision"] == "BET").sum())
+    print(f"\n{n_bet} actionable of {len(best)} markets ({len(rows)} sides). Full table per game in the report.")
 
     val = ROOT / "reports" / "validation_summary.md"
     md = report.header(season, week, SOURCES, track.model_version(), model, settings,
                        val.read_text() if val.exists() else None, art.get("timeline", {}), clock.simulated)
+    md += "\n" + report.actionable_md(rows, settings) + "\n" + report.watchlist_md(watch, settings, preds)
+    md += "\n" + report.diagnostics_md(rows, settings)
     for g in preds.itertuples(index=False):
         md += "\n" + report.game_section(g, contexts[g.game_id], rows[rows["game_id"] == g.game_id], coefs, model,
                                          settings)
@@ -270,6 +280,12 @@ def cmd_predict(args):
     out.parent.mkdir(exist_ok=True)
     out.write_text(md)
     print(f"Report: {out.relative_to(ROOT)}")
+    if out.parent == ROOT / "reports":
+        latest = ROOT / "reports" / "LATEST.md"
+        latest.write_text(f"# Latest weekly report\n\n[{season} week {week}]({out.name}) - model "
+                          f"`{track.model_version()}`, completed {art.get('timeline', {}).get('prediction_completed_utc', '?')}"
+                          f" (UTC): {n_bet} actionable of {len(best)} markets.\n")
+        print(f"Latest-report link: {latest.relative_to(ROOT)}")
     if live:
         record(rows, preds, art, settings, clock, args, games)
 
@@ -297,13 +313,15 @@ def cmd_recommend(args):
         print(f"  ! {n}")
     if rows.empty:
         raise SystemExit("No odds available for these games yet.")
+    from nflmodel import diagnose
+    rows["category"] = diagnose.categorize(rows, settings)
     markets = set(args.markets.split(","))
     rows = rows[rows["market"].isin(markets)]
     show = rows if args.all else rows[rows["is_best_side"]]
 
     g = preds.set_index("game_id")
-    head = ["Date", "Game", "Market", "Bet", "Book", "Odds", "Implied", "Mkt no-vig", "Model", "EV",
-            "EV -0.5pt", "Kelly", "Stake", "Decision"]
+    head = ["Date", "Game", "Market", "Bet", "Book", "Odds", "Implied", "Raw mkt", "Final", "EV",
+            "EV -0.5pt", "Kelly", "Stake", "Status"]
     align = "llllllrrrrrrrl"
     graded = not live
     if graded:
@@ -315,7 +333,9 @@ def cmd_recommend(args):
                 report.MARKET[r["market"]], report._bet(r), str(r["book"]), f"{int(r['price']):+d}",
                 report._pct(r["implied"]), report._pct(r["market_prob"]), report._pct(r["model_prob"]),
                 f"{r['ev']:+.1%}", f"{r['ev[fair 0.5 worse]']:+.1%}", f"{r['kelly']:.1%}",
-                f"{r['stake_units']:.2f}u" if r["decision"] != "NO BET" else "-", r["decision"]]
+                # historical replay grades every non-NO-BET side (closing consensus, see validate.py)
+                f"{r['stake_units']:.2f}u" if r["decision"] == "BET" or (graded and r["decision"] != "NO BET")
+                else "-", report.status_label(r)]
         if graded:
             res = grade_bet(r["market"], r["side"], r["point"], x.home_score, x.away_score) if pd.notna(x.home_score) else ""
             u = profit(res, r["price"]) * r["stake_units"] if res and r["decision"] != "NO BET" else np.nan
@@ -522,6 +542,22 @@ def cmd_experiment(args):
           f"total {m['total_base']:.3f} -> {m['total_exp']:.3f}")
 
 
+def cmd_compare_models(args):
+    """Legacy vs model vs market-only probabilities on development seasons (docs/EXPERIMENTS.md, CAL)."""
+    from nflmodel import modes
+    version = track.model_version()
+    if version.endswith("-modified") or version == "unknown":
+        raise SystemExit("Comparisons are recorded against a commit; commit your changes first.")
+    _, feat, _, _, _ = build(refresh=not args.no_refresh)
+    print("Comparing probability models on development seasons 2015-2021 (3 arms x 2 price sets) ...")
+    rec = modes.run(feat, version, load_settings())
+    md = modes.to_markdown(rec)
+    out = ROOT / "reports" / "probability_models.md"
+    out.write_text("# Probability model comparison (development seasons)\n\n" + md + "\n")
+    print(md)
+    print(f"\nRecorded in logs/experiments.jsonl; report {out.relative_to(ROOT)}")
+
+
 def cmd_check_live(args):
     """Diagnose the live bookmaker feed. Prints statistics only; writes nothing."""
     from nflmodel import apikey, livecheck
@@ -556,6 +592,17 @@ def cmd_check_live(args):
     summary = livecheck.summarize(valid, rejected, kick, collected, settings.min_reference_books)
     print("\nLive feed: " + ("WORKING" if summary["valid_quotes"] else "REACHABLE BUT NO VALID QUOTES"))
     print(livecheck.format_summary(summary, settings.min_reference_books))
+    from nflmodel.config import actionable_set
+    mine = actionable_set(settings)
+    print("\nActionable books: " + (", ".join(sorted(mine)) + " (all others are reference-only)" if mine else
+                                   "not configured (actionable_books in settings.toml); all books treated as actionable"))
+    cmp_ = livecheck.compare_books(valid, mine)
+    if len(cmp_):
+        cmp_.to_csv(ROOT / "data" / "book_comparison.csv", index=False)
+        print(table([[r.game_id, r.market, r.side, str(r.books), r.lines, r.best, r.worst]
+                     for r in cmp_.itertuples(index=False)],
+                    ["Game", "Market", "Side", "Books", "Lines", "Best (actionable)", "Worst"], "lllrlll"))
+        print("Every quote with its book: data/book_comparison.csv")
     if livecheck.quota_line(SOURCES):
         print(livecheck.quota_line(SOURCES))
 
@@ -675,6 +722,7 @@ def main():
     vo = sub.add_parser("void", help="void a recorded wager (e.g. cancelled by the book)")
     vo.add_argument("--bet-id", required=True); vo.add_argument("--reason", required=True)
     sub.add_parser("verify-log", help="check the forecast history and ledger hash chains")
+    sub.add_parser("compare-models", help="legacy vs model vs market-only probabilities (dev seasons)")
     ex = sub.add_parser("experiment", help="ablate one feature group (docs/EXPERIMENTS.md)")
     ex.add_argument("--group", required=True, choices=["G1", "G2", "G3", "G4"])
     ex.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
@@ -696,6 +744,7 @@ def main():
      "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates,
      "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log,
      "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live,
+     "compare-models": cmd_compare_models,
      "coverage": cmd_coverage}[args.cmd](args)
 
 

@@ -122,7 +122,8 @@ FORECAST_FIELDS = ["game_id", "kickoff_utc", "season", "week", "away_team", "hom
                    "reference_live", "reference_books", "reference_excluded", "reference_oldest_utc",
                    "reference_provenance", "p_win", "p_push", "model_prob", "implied", "market_prob", "ev",
                    "ev[fair 0.5 worse]", "ev[market only]", "min_price", "decision", "stake_units",
-                   "reasons", "is_best_side"]
+                   "reasons", "is_best_side", "market_cal_prob", "probability_model", "ev_raw_market",
+                   "venue_ok", "blocks", "conditions", "category"]
 
 TIER = {"BET": "executable", "BET IF CONFIRMED": "conditional",
         "BET IF PRICE AVAILABLE": "conditional", "NO BET": "pass"}

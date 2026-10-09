@@ -167,6 +167,19 @@ def _logistic_n(X: np.ndarray, y: np.ndarray, ridge: float = 1.0, iters: int = 5
     return w
 
 
+def _logistic_offset(x: np.ndarray, offset: np.ndarray, y: np.ndarray, ridge: float = 1.0,
+                     iters: int = 50) -> float:
+    """c in P(y) = sigmoid(offset + c * x): the market's log-odds enter with weight 1 and
+    no intercept, so only the model's disagreement is estimated (light ridge toward 0)."""
+    c = 0.0
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-(offset + c * x)))
+        g = np.sum(x * (y - p)) - ridge * c
+        h = np.sum(x * x * p * (1 - p)) + ridge
+        c += g / h
+    return float(c)
+
+
 def logit(p):
     p = np.clip(np.asarray(p, float), 1e-6, 1 - 1e-6)
     return np.log(p / (1 - p))
@@ -209,6 +222,17 @@ class FittedModel:
     spread_cal: np.ndarray = None
     total_cal: np.ndarray = None
     ml_cal: np.ndarray = None
+    # Offset calibration [0, 1, c] per market: the market probability is kept as is (weight 1,
+    # no intercept) and only c, the value of the model's edge, is fit out of sample.
+    offset_cal: dict = None
+
+    def cal_for(self, market: str, mode: str) -> np.ndarray:
+        """Calibration vector [a, b, c] for `market` under probability_model `mode`."""
+        if mode == "legacy":
+            return {"spread": self.spread_cal, "total": self.total_cal, "ml": self.ml_cal}[market]
+        if mode == "market":
+            return np.array([0.0, 1.0, 0.0])
+        return self.offset_cal[market]
 
     @property
     def pure(self) -> Ridge:
@@ -289,6 +313,18 @@ def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3,
                          mm["blend_margin"] - mm["spread_line"]]),
         (mm["result"] > 0).to_numpy(float))
 
+    def off(x, p_first, y):
+        return np.array([0.0, 1.0, _logistic_offset(np.asarray(x, float), logit(p_first), np.asarray(y, float))])
+    offset_cal = {
+        "spread": off(ms["blend_margin"] - ms["spread_line"],
+                      novig_first(ms["home_spread_odds"], ms["away_spread_odds"]),
+                      (ms["result"] > ms["spread_line"]).to_numpy(float)),
+        "total": off(tt["blend_total"] - tt["total_line"], novig_first(tt["over_odds"], tt["under_odds"]),
+                     (tt["total"] > tt["total_line"]).to_numpy(float)),
+        "ml": off(mm["blend_margin"] - mm["spread_line"], novig_first(mm["home_moneyline"], mm["away_moneyline"]),
+                  (mm["result"] > 0).to_numpy(float)),
+    }
+
     return FittedModel(core, k_spread, k_total, ml_a, ml_b,
                        OutcomeDist(sd, mw, MARGINS), OutcomeDist(tsd, tw, TOTALS),
-                       spread_cal, total_cal, ml_cal)
+                       spread_cal, total_cal, ml_cal, offset_cal)

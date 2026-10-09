@@ -111,7 +111,7 @@ def run(feat: pd.DataFrame, seasons: list[int], settings: Settings | None = None
         test = model.predict(played[played["season"] == s]).copy()
 
         # Win probabilities: model and baselines (all fit on training seasons only)
-        pricers = [decide.GamePricer(model, g) for g in test.itertuples(index=False)]
+        pricers = [decide.make_pricer(model, g, settings) for g in test.itertuples(index=False)]
         test["p_model"] = [pr.probs("ml", "home", np.nan)[0] for pr in pricers]
         tr = model.core.raw(train)
         dec = tr["result"] != 0
@@ -125,12 +125,12 @@ def run(feat: pd.DataFrame, seasons: list[int], settings: Settings | None = None
         for g, pr in zip(test.itertuples(index=False), pricers):
             if pd.notna(g.spread_line):
                 w, p = pr.probs("spread", "home", -g.spread_line)
-                cov.append(w / (1 - p)); cov_m.append(pr.p_spread_mkt)
+                cov.append(w / (1 - p)); cov_m.append(pr.reference_prob("spread", "home", -g.spread_line))
             else:
                 cov.append(np.nan); cov_m.append(np.nan)
             if pd.notna(g.total_line):
                 w, p = pr.probs("total", "over", g.total_line)
-                ovr.append(w / (1 - p)); ovr_m.append(pr.p_total_mkt)
+                ovr.append(w / (1 - p)); ovr_m.append(pr.reference_prob("total", "over", g.total_line))
             else:
                 ovr.append(np.nan); ovr_m.append(np.nan)
         test["p_cover"], test["p_cover_mkt"] = cov, cov_m

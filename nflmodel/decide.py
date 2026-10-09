@@ -36,7 +36,8 @@ import pandas as pd
 
 from .config import Settings
 from .market import _invert
-from .model import FittedModel, novig_first
+from .config import actionable_set
+from .model import FittedModel, logit, novig_first, sigmoid
 from .odds import ev, implied_probability, kelly
 
 UNSURE = {"Out", "Doubtful", "Questionable"}
@@ -276,6 +277,12 @@ class GamePricer:
         cond, _ = self._cond_over(dist, mu, t)
         return cond if side in ("home", "over") else 1 - cond
 
+    def calibrated_market_prob(self, market: str, side: str, point) -> float:
+        """Legacy calibration applied to the market probability with the model edge set to 0,
+        at the consensus/reference line, transferred to `point` like probs()."""
+        p_win, p_push = self.probs(market, side, point, edge_mult=0.0)
+        return p_win / (1 - p_push) if p_push < 1 else np.nan
+
     @staticmethod
     def _cond_over(dist, mu, t):
         over, push, under = dist.prob_over(mu, t)
@@ -309,6 +316,141 @@ class GamePricer:
         return p * (1 - push_t), push_t
 
 
+class AnchoredPricer:
+    """Probabilities anchored to the market reference at the EXACT line being priced.
+
+    For probability_model "model" / "market" (GamePricer is the "legacy" baseline).
+
+      raw market     p_mkt(line): the reference's implied mean (live, leave-one-book-out;
+                     else the untimed consensus pair) pushed through the key-number
+                     outcome distribution to this line. No model input.
+      calibrated     sigmoid(a + b*logit(p_mkt)) with edge 0; for "model"/"market" a=0,
+      market-only    b=1, so it equals the raw market probability.
+      final          sigmoid(a + b*logit(p_mkt) + c*edge): the model's edge (blend minus the
+                     reference line) moves the market by c per point, c fit out of sample.
+
+    Leave-one-book-out holds for every input: with a live reference built without book B,
+    the blend (whose inputs include the market line) is recomputed at that reference's
+    line, so neither the anchor nor the model's edge sees B's quotes.
+    """
+
+    LIMITS = {"spread": (-60.0, 60.0), "total": (5.0, 125.0)}
+
+    def __init__(self, model: FittedModel, g, key_numbers: bool = True, refs: dict | None = None,
+                 mode: str = "model"):
+        self.m, self.g, self.mode = model, g, mode
+        self.mdist, self.tdist = model.margin_dist, model.total_dist
+        if not key_numbers:
+            self.mdist = copy.copy(self.mdist); self.mdist.w = np.ones_like(self.mdist.w)
+            self.tdist = copy.copy(self.tdist); self.tdist.w = np.ones_like(self.tdist.w)
+        self.refs = refs = refs or {}
+        self.live = {mk: refs.get(mk) is not None for mk in ("spread", "total", "ml")}
+        # anchor (line, P(home covers | over) at that line) per market, without the evaluated book
+        anchors = {}
+        for mk, line, a, b in (("spread", g.spread_line, g.home_spread_odds, g.away_spread_odds),
+                               ("total", g.total_line, g.over_odds, g.under_odds)):
+            r = refs.get(mk)
+            if r is not None:
+                anchors[mk] = (r.line, r.p)
+            elif pd.notna(line):
+                anchors[mk] = (line, float(novig_first(a, b)))
+        self.anchor_line = {mk: v[0] for mk, v in anchors.items()}
+        self.mu = {mk: _invert(self.mdist if mk == "spread" else self.tdist, line, p, *self.LIMITS[mk])
+                   for mk, (line, p) in anchors.items()}
+        if refs.get("ml") is not None:
+            self.p_ml_mkt = refs["ml"].p
+        elif pd.notna(g.home_moneyline) and pd.notna(g.away_moneyline):
+            self.p_ml_mkt = float(novig_first(g.home_moneyline, g.away_moneyline))
+        else:
+            self.p_ml_mkt = np.nan
+        # model edge vs the anchor line, with the blend recomputed at that line
+        self.edge = {}
+        for mk, blend_col, line_col, ridge in (("spread", "blend_margin", "spread_line", model.core.blend),
+                                               ("total", "blend_total", "total_line", model.core.total_blend)):
+            if mk not in self.anchor_line:
+                self.edge[mk] = 0.0
+                continue
+            L = self.anchor_line[mk]
+            if pd.notna(getattr(g, line_col)) and L == getattr(g, line_col) and pd.notna(getattr(g, blend_col)):
+                blend = getattr(g, blend_col)
+            else:
+                row = pd.DataFrame([g._asdict()]).assign(**{line_col: L})
+                blend = float(ridge.predict(row)[0])
+            self.edge[mk] = float(blend - L) if np.isfinite(blend) else 0.0
+        self.blend_line = {mk: self.anchor_line[mk] + self.edge[mk] for mk in self.anchor_line}
+
+    def _cal(self, market: str) -> np.ndarray:
+        return self.m.cal_for(market, self.mode)
+
+    def _over(self, market: str, t: float, shift: float = 0.0):
+        dist = self.mdist if market == "spread" else self.tdist
+        over, push, under = dist.prob_over(self.mu[market] + shift, t)
+        return over / (over + under), push
+
+    @staticmethod
+    def _t(market: str, side: str, point) -> float:
+        return (-point if side == "home" else point) if market == "spread" else point
+
+    def reference_prob(self, market: str, side: str, point) -> float:
+        """The market's own no-vig probability for this exact bet (no model input), or NaN."""
+        if market == "ml":
+            p = self.p_ml_mkt
+            return p if side == "home" else 1 - p
+        if market not in self.mu:
+            return np.nan
+        cond, _ = self._over(market, self._t(market, side, point))
+        return cond if side in ("home", "over") else 1 - cond
+
+    def calibrated_market_prob(self, market: str, side: str, point) -> float:
+        """Calibration applied to the raw market probability with no model edge."""
+        cal = self._cal(market)
+        if market == "ml":
+            p = self.p_ml_mkt
+            if pd.isna(p):
+                return np.nan
+            q = float(sigmoid(cal[0] + cal[1] * logit(p)))
+            return q if side == "home" else 1 - q
+        if market not in self.mu:
+            return np.nan
+        cond, _ = self._over(market, self._t(market, side, point))
+        q = float(sigmoid(cal[0] + cal[1] * logit(cond)))
+        return q if side in ("home", "over") else 1 - q
+
+    def probs(self, market: str, side: str, point, shift: float = 0.0, edge_mult: float = 1.0):
+        """(p_win, p_push). shift moves the true margin/total toward the home/over side."""
+        cal = self._cal(market)
+        if market == "ml":
+            if pd.isna(self.p_ml_mkt):   # no moneyline market at all: ratings-based fallback
+                p = self.m.win_prob(self.g.fair_margin + shift)
+            else:
+                base = float(sigmoid(cal[0] + cal[1] * logit(self.p_ml_mkt) + cal[2] * self.edge.get("spread", 0.0)
+                                     * edge_mult))
+                centre = self.mu.get("spread", self.g.fair_margin)
+                p = base + (self.m.win_prob(centre + shift) - self.m.win_prob(centre))
+            p = float(np.clip(p, 0.001, 0.999))
+            return (p, 0.0) if side == "home" else (1 - p, 0.0)
+        t = self._t(market, side, point)
+        if market not in self.mu:   # no market line: the model's own distribution
+            dist = self.mdist if market == "spread" else self.tdist
+            mu = self.g.fair_margin if market == "spread" else self.g.fair_total
+            over, push, under = dist.prob_over(mu + shift, t)
+            cond = over / (over + under)
+        else:
+            cond, push = self._over(market, t, shift)
+            cond = float(sigmoid(cal[0] + cal[1] * logit(cond) + cal[2] * self.edge[market] * edge_mult))
+        cond = float(np.clip(cond, 0.001, 0.999))
+        p = cond if side in ("home", "over") else 1 - cond
+        return p * (1 - push), push
+
+
+def make_pricer(model: FittedModel, g, settings: Settings | None = None, key_numbers: bool = True,
+                refs: dict | None = None):
+    mode = settings.probability_model if settings is not None else "model"
+    if mode == "legacy":
+        return GamePricer(model, g, key_numbers=key_numbers, refs=refs)
+    return AnchoredPricer(model, g, key_numbers=key_numbers, refs=refs, mode=mode)
+
+
 def _against(market: str, side: str) -> float:
     """Direction that makes the bet worse: -1 lowers margin/total, +1 raises it."""
     return -1.0 if side in ("home", "over") else 1.0
@@ -338,12 +480,13 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext, s
     rows = []
     pricers: dict = {}
     min_edge, min_ref_books = settings.min_edge, settings.min_reference_books
+    venues = actionable_set(settings)
 
     def pricer_for(book, plain=False):
         key = (book, plain)
         if key not in pricers:
             r = {m: refs.get((m, book)) for m in ("spread", "ml", "total")} if refs else None
-            pricers[key] = GamePricer(model, g, key_numbers=not plain, refs=r)
+            pricers[key] = make_pricer(model, g, settings, key_numbers=not plain, refs=r)
         return pricers[key]
 
     for (market, side), o in offers.groupby(["market", "side"]):
@@ -354,6 +497,16 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext, s
             o = o[o["source"] != "consensus"]   # live quotes exist: untimed consensus is not an offer
         if o.empty:
             continue
+        # Actionable venues: every book feeds the references, but the bet is chosen only among
+        # books the user can use. If none of them quotes this side, the best other price is
+        # shown for information and the side cannot be a bet.
+        venue_ok = True
+        if venues and o["source"].ne("consensus").any():
+            mine = o[o["book"].astype(str).str.lower().isin(venues)]
+            if len(mine):
+                o = mine
+            else:
+                venue_ok = False
         scored = []
         for r in o.itertuples(index=False):
             pw, pp = pricer_for(r.book).probs(market, side, r.point)
@@ -377,6 +530,7 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext, s
             "no key-number shape": ev_at(plain=True),
         }
         mkt_p = pricer.reference_prob(market, side, point)
+        cal_p = pricer.calibrated_market_prob(market, side, point)
         if ref is not None:
             ref_desc = (f"live: {ref.n_books} other books ({', '.join(ref.books)}), quotes "
                         f"{ref.oldest_utc:%H:%M}-{ref.newest_utc:%H:%M}Z, spread across books "
@@ -397,7 +551,11 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext, s
                 f"{r.book} {'' if pd.isna(r.point) else f'{r.point:+g} ' if market == 'spread' else f'{r.point:g} '}{int(r.price):+d}"
                 for r in o.itertuples(index=False))),
             "p_win": pw, "p_push": pp, "model_prob": pw / decided if decided > 0 else np.nan,
-            "implied": implied_probability(best.price), "market_prob": mkt_p, "reference": ref_desc,
+            "implied": implied_probability(best.price), "market_prob": mkt_p, "market_cal_prob": cal_p,
+            "probability_model": settings.probability_model,
+            "ev_raw_market": ev(mkt_p * (1 - pp), pp, best.price) if pd.notna(mkt_p) else np.nan,
+            "venue_ok": venue_ok, "blocks": " | ".join(ctx.block.get(market, [])),
+            "conditions": " | ".join(ctx.conditions), "reference": ref_desc,
             "reference_live": ref is not None,
             "reference_books": ",".join(ref.books) if ref is not None else "",
             "reference_excluded": best.book,
@@ -413,6 +571,9 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext, s
         elif sens["fair 0.5 worse"] <= 0:
             reasons.append(f"too sensitive: EV {sens['fair 0.5 worse']:+.1%} if fair line 0.5 pt worse")
         reasons += ctx.block.get(market, [])
+        if not venue_ok:
+            reasons.append(f"best price only at books you don't use ({best.book}); actionable books: "
+                           f"{', '.join(sorted(venues))}")
         if reasons:
             rec["decision"] = "NO BET"
         elif rec["price_source"] in BOOK_SOURCES_WITH_TIME and ref is not None and not ctx.conditions:

@@ -75,3 +75,39 @@ How to read this:
   the market already prices that information.
 * These are null results on 1,843–1,881 games. They do not show the data is
   useless. They show it adds nothing measurable beyond closing prices.
+
+## CAL: probability model comparison (protocol written 2026-10-09, before the recorded run)
+
+**Why.** An audit of the 2026 week 5 run found the legacy calibration
+`sigmoid(a + b*logit(p_market) + c*edge)`:
+* has a free intercept and slope on the market's log-odds that move every
+  probability by about 1–2.4 points (mean, development seasons) with no
+  significant log-loss gain, and a spread slope whose sign changes across seasons;
+* in live use, is applied at the stale consensus line to references that moved,
+  an input range it was never fit on (up to 6 points of spurious probability in the
+  regression test);
+* measures the model's edge against a line that includes the evaluated book.
+
+**Disclosure.** Before writing this protocol, the development-period log loss of
+the raw market vs the legacy calibration was looked at during the audit (scratch
+analysis, not recorded). The holdout (2022+) was not looked at and is not used.
+
+**Arms** (identical walk-forward fits, games, prices and Settings except
+`probability_model`):
+* `legacy`: the baseline, unchanged
+* `model`: offset calibration: the market's log-odds kept with weight 1, no
+  intercept; only `c` (value of one point of model edge) is fit out of sample;
+  probabilities anchored at the exact line priced
+* `market`: the market reference alone (`c = 0`)
+
+**Metrics** on identical development rows (2015–2021): log loss, Brier, ECE per
+target; paired game-clustered bootstrap CIs of log-loss differences; bet
+frequency, flat ROI with game-clustered CIs and max drawdown at closing consensus
+prices and at a fixed −110/−110 juice; market coverage.
+
+**Decision rule.** `model` is a correctness fix and stays the default unless it is
+significantly worse than `legacy` (paired log-loss CI entirely above 0) on any
+target. Bet counts and ROI are reported but are NOT a criterion: more bets or a
+higher historical ROI are not evidence of improvement, and the single consensus
+price per side cannot test price shopping (the `market` arm cannot bet on it by
+construction). No thresholds are tuned on these results.

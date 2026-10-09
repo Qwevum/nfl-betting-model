@@ -68,12 +68,18 @@ T0 = parse_utc("2026-10-11T15:50:00Z")
 
 def fake_model():
     """Market-only model: anchored probability = market probability."""
-    return SimpleNamespace(
+    ident = np.array([0.0, 1.0, 0.0])
+    m = SimpleNamespace(
         margin_dist=OutcomeDist(13.0, np.ones(len(MARGINS)), MARGINS),
         total_dist=OutcomeDist(13.5, np.ones(len(TOTALS)), TOTALS),
-        spread_cal=np.array([0.0, 1.0, 0.0]), total_cal=np.array([0.0, 1.0, 0.0]),
-        ml_cal=np.array([0.0, 1.0, 0.0]), anchored=FittedModel.anchored,
+        spread_cal=ident, total_cal=ident, ml_cal=ident, anchored=FittedModel.anchored,
+        offset_cal={"spread": ident, "total": ident, "ml": ident},
+        # blend = the market line it is given, so the model never disagrees with the market
+        core=SimpleNamespace(blend=SimpleNamespace(predict=lambda d: d["spread_line"].to_numpy(float)),
+                             total_blend=SimpleNamespace(predict=lambda d: d["total_line"].to_numpy(float))),
         win_prob=lambda m: 1 / (1 + np.exp(-m / 6.0)), k_spread=0.0)
+    m.cal_for = lambda market, mode: FittedModel.cal_for(m, market, mode)
+    return m
 
 
 def game_row():

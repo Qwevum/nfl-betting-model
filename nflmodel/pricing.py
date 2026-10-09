@@ -35,10 +35,14 @@ def price_slate(model, day: pd.DataFrame, valid: pd.DataFrame, consensus: pd.Dat
         refs = market.references_for_game(o, model, settings.min_reference_books)
         refs_by_game[gid] = refs
         m = day["game_id"] == gid
+        # The all-books reference is shown for information only. It is NOT written into the
+        # shared spread_line/total_line: those feed the model's blend, and the all-books line
+        # contains every book's own quotes. Each offer is priced by decide.make_pricer against
+        # the reference built WITHOUT its book, with the blend recomputed at that line.
         if refs[("spread", None)] is not None:
-            day.loc[m, "spread_line"] = refs[("spread", None)].line
+            day.loc[m, "live_spread_line"] = refs[("spread", None)].line
         if refs[("total", None)] is not None:
-            day.loc[m, "total_line"] = refs[("total", None)].line
+            day.loc[m, "live_total_line"] = refs[("total", None)].line
         if any(refs[(mk, None)] is not None for mk in ("spread", "ml", "total")):
             day.loc[m, "reference_kind"] = "live bookmaker quotes"
     offers = pd.concat([valid, consensus], ignore_index=True)

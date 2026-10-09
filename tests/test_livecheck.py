@@ -70,7 +70,8 @@ class KeyHandling(unittest.TestCase):
             self.assertNotIn("secret-xyz", desc)
             self.assertNotIn("secret-xyz", livecheck.redact("GET ...?apiKey=secret-xyz failed"))
             self.assertNotIn("secret-xyz", livecheck.describe_failure(RuntimeError("bad url apiKey=secret-xyz")))
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(livecheck.apikey, "ENV_FILE", Path("/nonexistent/.env")):
             self.assertFalse(livecheck.key_status()[0])
         with mock.patch.dict(os.environ, {"ODDS_API_KEY": "  "}):
             self.assertFalse(livecheck.key_status()[0])
