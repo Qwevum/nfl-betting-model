@@ -719,3 +719,34 @@ avoids a second TOML dependency path.
 * `tomllib` is the TOML reader
 
 The suite passes: 104 tests.
+
+## 16. Structured provenance for every market reference
+
+**Problem:** a reference kept only summary fields: books, the oldest and
+newest pair times, and the per-book mean. It did not keep which quotes, lines
+and prices built it, or each side's timestamp. Those are needed to revalidate
+the reference later and to audit a decision.
+
+**Files:** `nflmodel/market.py`, `nflmodel/decide.py`, `nflmodel/store.py`,
+`run.py`, `tests/test_market.py`.
+
+**Change:**
+* Each pair keeps both sides (side, point, price, quote time).
+* `Reference.quotes` holds the contributing pairs, and
+  `Reference.provenance()` returns them as JSON-safe data with the excluded
+  book.
+* Decision rows, and therefore recorded forecasts, carry:
+  * `reference_books`
+  * `reference_excluded`
+  * `reference_oldest_utc` (the oldest side of any contributing pair)
+  * `reference_provenance`
+* The snapshot's `references.csv` stores the provenance JSON per
+  (game, market, excluded book).
+
+**Verification:** a new test checks that:
+* both sides of every contributing pair are recorded, with their own times
+* the excluded book is named and absent
+* the oldest time is the oldest side
+* the snapshot frame round-trips
+
+The suite passes: 105 tests.

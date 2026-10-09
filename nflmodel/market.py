@@ -47,6 +47,18 @@ class Reference:
     excluded_book: str | None = None
     kind: str = "live"
     per_book: dict = field(default_factory=dict)
+    quotes: list = field(default_factory=list)    # the contributing two-sided pairs (provenance)
+
+    def provenance(self) -> dict:
+        """JSON-safe record of exactly which quotes built this reference."""
+        def t(x):
+            return None if x is None else pd.Timestamp(x).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"market": self.market, "excluded_book": self.excluded_book, "books": self.books,
+                "line": self.line, "p": self.p, "oldest_utc": t(self.oldest_utc), "newest_utc": t(self.newest_utc),
+                "quotes": [{"book": q["book"], "line": q["line"],
+                            "sides": [{"side": sd["side"], "point": sd["point"], "price": sd["price"],
+                                       "time_utc": t(sd["time"])} for sd in q["sides"]]}
+                           for q in self.quotes]}
 
 
 def _latest(offers: pd.DataFrame) -> pd.DataFrame:
@@ -82,8 +94,10 @@ def book_pairs(offers: pd.DataFrame, market: str, gap_minutes: float = PAIR_MAX_
             if abs(t1 - t2) > gap:
                 continue
             i1, i2 = implied_probability(first.price), implied_probability(second.price)
+            sides = [{"side": x.side, "point": None if pd.isna(x.point) else float(x.point),
+                      "price": float(x.price), "time": x.odds_time_utc} for x in (first, second)]
             out.append({"book": book, "line": line, "p": i1 / (i1 + i2),
-                        "overround": i1 + i2 - 1, "time": max(t1, t2), "oldest": min(t1, t2)})
+                        "overround": i1 + i2 - 1, "time": max(t1, t2), "oldest": min(t1, t2), "sides": sides})
     return out
 
 
@@ -119,7 +133,7 @@ def build_reference(offers: pd.DataFrame, market: str, model, min_books: int,
         return Reference("ml", len(chosen), sorted(by_book), None, None, p,
                          float(max(q["p"] for q in chosen) - min(q["p"] for q in chosen)),
                          min(q["oldest"] for q in chosen), max(q["time"] for q in chosen), exclude_book,
-                         per_book={q["book"]: q["p"] for q in chosen})
+                         per_book={q["book"]: q["p"] for q in chosen}, quotes=chosen)
     dist = model.margin_dist if market == "spread" else model.total_dist
     lo, hi = (-60.0, 60.0) if market == "spread" else (5.0, 125.0)
     all_lines = np.median([q["line"] for q in pairs])
@@ -131,7 +145,22 @@ def build_reference(offers: pd.DataFrame, market: str, model, min_books: int,
     return Reference(market, len(chosen), sorted(by_book), line, mu, over / (over + under),
                      float(mus.max() - mus.min()),
                      min(q["oldest"] for q in chosen), max(q["time"] for q in chosen), exclude_book,
-                     per_book={q["book"]: float(m) for q, m in zip(chosen, mus)})
+                     per_book={q["book"]: float(m) for q, m in zip(chosen, mus)}, quotes=chosen)
+
+
+def references_frame(refs_by_game: dict) -> pd.DataFrame:
+    """Snapshot table: one row per (game, market, excluded book) with full provenance as JSON."""
+    import json
+    rows = []
+    for gid, refs in refs_by_game.items():
+        for (mk, ex), r in refs.items():
+            if r is None:
+                continue
+            rows.append({"game_id": gid, "market": mk, "excluded_book": ex, "n_books": r.n_books,
+                         "books": ",".join(r.books), "line": r.line, "mu": r.mu, "p": r.p,
+                         "oldest_utc": r.provenance()["oldest_utc"], "newest_utc": r.provenance()["newest_utc"],
+                         "provenance": json.dumps(r.provenance(), sort_keys=True)})
+    return pd.DataFrame(rows)
 
 
 def references_for_game(offers: pd.DataFrame, model, min_books: int,

@@ -124,10 +124,7 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
                 day.loc[m, "total_line"] = refs[("total", None)].line
             if any(refs[(mk, None)] is not None for mk in ("spread", "ml", "total")):
                 day.loc[m, "reference_kind"] = "live bookmaker quotes"
-        art["references"] = pd.DataFrame([
-            {"game_id": gid, "market": mk, "excluded_book": ex, **{k: v for k, v in vars(r).items() if k != "per_book"},
-             "per_book": str(r.per_book)}
-            for gid, refs in refs_by_game.items() for (mk, ex), r in refs.items() if r is not None])
+        art["references"] = market.references_frame(refs_by_game)
         offers = pd.concat([valid, consensus], ignore_index=True)
     else:
         inj = pd.DataFrame()

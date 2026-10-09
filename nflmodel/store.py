@@ -119,7 +119,8 @@ def save_snapshot(run_id: str, files: dict[str, Path], frames: dict[str, pd.Data
 
 FORECAST_FIELDS = ["game_id", "kickoff_utc", "season", "week", "away_team", "home_team", "market", "side",
                    "team", "book", "point", "price", "price_source", "odds_time", "reference",
-                   "reference_live", "p_win", "p_push", "model_prob", "implied", "market_prob", "ev",
+                   "reference_live", "reference_books", "reference_excluded", "reference_oldest_utc",
+                   "reference_provenance", "p_win", "p_push", "model_prob", "implied", "market_prob", "ev",
                    "ev[fair 0.5 worse]", "ev[market only]", "min_price", "decision", "stake_units",
                    "reasons", "is_best_side"]
 

@@ -28,6 +28,7 @@ No-bet rules (any one is enough):
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -398,6 +399,10 @@ def decide_game(model: FittedModel, g, offers: pd.DataFrame, ctx: GameContext, s
             "p_win": pw, "p_push": pp, "model_prob": pw / decided if decided > 0 else np.nan,
             "implied": implied_probability(best.price), "market_prob": mkt_p, "reference": ref_desc,
             "reference_live": ref is not None,
+            "reference_books": ",".join(ref.books) if ref is not None else "",
+            "reference_excluded": best.book,
+            "reference_oldest_utc": ref.provenance()["oldest_utc"] if ref is not None else None,
+            "reference_provenance": json.dumps(ref.provenance(), sort_keys=True) if ref is not None else None,
             "ev": e, "kelly": kelly(pw, pp, best.price),
             "min_price": price_for_edge(pw, pp, min_edge),
             **{f"ev[{k}]": v for k, v in sens.items()},

@@ -132,3 +132,22 @@ class Moneyline(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Provenance(unittest.TestCase):
+    def test_reference_records_both_sides_of_every_contributing_pair(self):
+        import json
+        rows = (spread_quotes("a", -3.0, 0.50) + spread_quotes("b", -3.5, 0.48)
+                + spread_quotes("c", -3.0, 0.52, t=T0 - pd.Timedelta(minutes=12)))
+        rows[1]["odds_time_utc"] = T0 - pd.Timedelta(minutes=3)       # book a's away side quoted earlier
+        ref = market.build_reference(pd.DataFrame(rows), "spread", MODEL, min_books=2, exclude_book="c")
+        prov = ref.provenance()
+        self.assertEqual(prov["excluded_book"], "c")
+        self.assertEqual(sorted(q["book"] for q in prov["quotes"]), ["a", "b"])
+        a = next(q for q in prov["quotes"] if q["book"] == "a")
+        self.assertEqual({sd["side"] for sd in a["sides"]}, {"home", "away"})
+        self.assertEqual({sd["time_utc"] for sd in a["sides"]}, {"2026-10-11T15:50:00Z", "2026-10-11T15:47:00Z"})
+        self.assertEqual(prov["oldest_utc"], "2026-10-11T15:47:00Z")  # oldest side, not the newest
+        frame = market.references_frame({"G": {("spread", "c"): ref, ("ml", None): None}})
+        self.assertEqual(len(frame), 1)
+        self.assertEqual(json.loads(frame["provenance"].iloc[0])["excluded_book"], "c")
