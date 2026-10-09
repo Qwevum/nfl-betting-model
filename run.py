@@ -625,6 +625,20 @@ def cmd_validate(args):
           validate.to_markdown(bs, {"flat_units": "{:+.1f}", "flat_roi": "{:+.1%}", "units @4.76%": "{:+.1f}",
                                     "roi @4.76%": "{:+.1%}", "spread_or": "{:.2%}", "ml_or": "{:.2%}",
                                     "total_or": "{:.2%}"})]
+    from nflmodel import spreadcal
+    print("Value of the model's edge (offset calibration c) per walk-forward season, game bootstrap ...")
+    ct = spreadcal.c_table(feat, seasons, n=1000, seed=0)
+    md += ["", "## Value of the model's edge: offset calibration c, per walk-forward season", "",
+           "c is the change in log-odds per point of model edge (blend minus line) in the live probability "
+           "sigmoid(logit p_market + c * edge). Each row is the model used for that test season (fit on earlier "
+           "seasons only); the 95% CI resamples whole games of its inner out-of-sample rows (1000 resamples). "
+           "c = 0 means the model's disagreement with the market adds nothing.", "",
+           validate.to_markdown(ct, {"c": "{:+.4f}", "lo": "{:+.4f}", "hi": "{:+.4f}"}), ""]
+    for mk in ("spread", "total", "ml"):
+        x = ct[ct["market"] == mk]
+        n0 = int(x["includes 0"].sum())
+        md.append(f"* **{mk}**: the 95% CI includes 0 in {n0} of {len(x)} seasons"
+                  + (" (every season): the model's edge is not distinguishable from no value." if n0 == len(x) else "."))
     out = ROOT / "reports" / "validation.md"
     out.parent.mkdir(exist_ok=True)
     out.write_text("\n".join(md) + "\n")
@@ -805,6 +819,55 @@ def cmd_validate_forecasts(args):
     fv.record(fv.summary_record(res, settings, period, version))
     print(md)
     print(f"\nReport {out.relative_to(ROOT)}; recorded in logs/experiments.jsonl")
+
+
+HIST_LINES_HELP = """Opening lines are not in nflverse games.csv. Supply a historical open/close file:
+  * Download the NFL historical results & odds spreadsheet from aussportsbetting.com
+    (Data -> Historical NFL Results and Odds Data; file nfl.xlsx).
+  * Save it as data/historical_lines.xlsx (needs `pip install openpyxl`) or export the sheet to
+    data/historical_lines.csv.
+  * Needed columns (names are matched loosely; see nflmodel/histlines.py ROLES): game date,
+    home team, away team, home line OPEN and CLOSE; optional: home/away line odds open and close,
+    total open/close. If the names differ, write data/historical_lines.mapping.json as
+    {"date": "...", "home_team": "...", "away_team": "...", "home_line_open": "...", "home_line_close": "..."}.
+"""
+
+
+def cmd_clv_backtest(args):
+    """Opening-line backtest: does the close move toward the model, and does betting the open earn CLV?"""
+    from nflmodel import clv, histlines
+    from nflmodel.validate import to_markdown
+    path = histlines.find_file()
+    if path is None:
+        print("No data/historical_lines.* found: nothing to backtest.\n")
+        print(HIST_LINES_HELP)
+        return
+    games, feat, _, _, _ = build(refresh=not args.no_refresh)
+    lines, rep = histlines.load(path, games)
+    a, b = (int(x) for x in args.seasons.split("-"))
+    seasons = list(range(a, b + 1))
+    settings = load_settings(min_edge=args.min_edge)
+    rows = clv.game_rows(feat, lines, seasons, settings)
+    if rows.empty:
+        raise SystemExit(f"No matched games with open and close lines in {args.seasons}.")
+    lm, bt = clv.line_move(rows), clv.bets(rows, settings.min_edge)
+    bs = clv.bet_summary(bt)
+    md = [f"# Opening lines and closing-line value ({args.seasons})", "", clv.__doc__.strip(), "",
+          "## Data", "", f"File `{rep['file']}`: {rep['rows']} rows, {rep['matched']} matched to schedule games "
+          f"({rep['swapped']} with home/away swapped), {len(rep['unmatched'])} unmatched. Sign convention: "
+          f"{rep['sign_convention']}. Median |file close - nflverse close|: {rep['median |close - nflverse close|']}.",
+          "", f"Column mapping: `{rep['mapping']}`", "",
+          f"Games used: {len(rows)}; opening line odds from the file for {int(rows['odds_from_file'].sum())} "
+          "(otherwise -110/-110).", "",
+          "## 1. Does the line move toward the model?", "", to_markdown(lm), "",
+          f"## 2. Bet at the open when EV > {settings.min_edge:.0%} (probability_model `{settings.probability_model}`)",
+          "", to_markdown(bs), ""]
+    if rep["unmatched"]:
+        md += ["## Unmatched rows (first 50)", "", to_markdown(pd.DataFrame(rep["unmatched"][:50])), ""]
+    out = ROOT / "reports" / "clv_backtest.md"
+    out.write_text("\n".join(md) + "\n", encoding="utf-8")
+    print("\n".join(md))
+    print(f"\nReport {out.relative_to(ROOT)}")
 
 
 def cmd_check_live(args):
@@ -998,6 +1061,8 @@ def main():
     vf.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
     vf.add_argument("--replicates", type=int, help="bootstrap replicates (default: uncertainty_replicates)")
     vf.add_argument("--workers", type=int, default=0, help="parallel processes (default: automatic)")
+    cb = sub.add_parser("clv-backtest", help="opening-line / closing-line-value backtest (needs data/historical_lines.*)")
+    cb.add_argument("--seasons", default="2015-2021", help="test seasons, e.g. 2015-2021 (default: development)")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
     t.add_argument("--week", type=int); t.add_argument("--season", type=int)
     for s in (p, fo, r):
@@ -1018,7 +1083,7 @@ def main():
      "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live,
      "compare-models": cmd_compare_models,
      "coverage": cmd_coverage, "simulate-intervals": cmd_simulate_intervals,
-     "validate-forecasts": cmd_validate_forecasts}[args.cmd](args)
+     "validate-forecasts": cmd_validate_forecasts, "clv-backtest": cmd_clv_backtest}[args.cmd](args)
 
 
 if __name__ == "__main__":

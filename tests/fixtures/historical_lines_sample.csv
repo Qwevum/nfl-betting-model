@@ -1,0 +1,30 @@
+SYNTHETIC test fixture in the AusSportsBetting layout (decimal odds; handicap-form lines),,,,,,,,,,,
+Date,Home Team,Away Team,Home Line Open,Home Line Close,Home Line Odds Open,Away Line Odds Open,Home Line Odds Close,Away Line Odds Close,Total Score Open,Total Score Close
+2019-09-08,Kansas City Chiefs,Oakland Raiders,-1.5,-2.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-09-15,Oakland Raiders,Los Angeles Chargers,8.5,7.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-09-22,Denver Broncos,Kansas City Chiefs,1.0,1.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-09-29,New England Patriots,Buffalo Bills,-1.5,-1.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-10-06,Buffalo Bills,Washington Redskins,-7.5,-6.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-10-13,Los Angeles Rams,San Francisco 49ers,2.5,3.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-10-20,San Francisco 49ers,Los Angeles Rams,-1.0,-1.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-10-27,Los Angeles Chargers,Denver Broncos,5.5,6.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-11-03,Washington Redskins,New England Patriots,6.5,7.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-11-10,Kansas City Chiefs,Los Angeles Chargers,7.5,6.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-11-17,Oakland Raiders,Denver Broncos,4.0,3.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-11-24,New England Patriots,Los Angeles Rams,-3.5,-3.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-12-01,Kansas City Chiefs,Oakland Raiders,3.0,3.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-12-08,Oakland Raiders,Los Angeles Chargers,4.5,3.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-12-15,Denver Broncos,Kansas City Chiefs,7.5,6.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-12-22,New England Patriots,Buffalo Bills,-2.0,-3.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-12-29,Buffalo Bills,Washington Redskins,6.0,6.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-09-08,Los Angeles Rams,San Francisco 49ers,-1.0,-1.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-09-15,San Francisco 49ers,Los Angeles Rams,-2.0,-2.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-09-22,Los Angeles Chargers,Denver Broncos,-3.5,-2.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-09-29,Washington Redskins,New England Patriots,-6.5,-6.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-10-06,Kansas City Chiefs,Los Angeles Chargers,-4.0,-3.5,1.91,1.91,1.87,1.95,44.5,45.0
+2019-10-13,Oakland Raiders,Denver Broncos,4.0,3.0,1.91,1.91,1.87,1.95,44.5,45.0
+2019-10-20,New England Patriots,Los Angeles Rams,2.5,3.5,1.91,1.91,1.87,1.95,44.5,45.0
+2020-09-13,Las Vegas Raiders,Kansas City Chiefs,6.5,7.0,,,,,,
+2019-10-27,San Francisco 49ers,Los Angeles Rams,2.5,3.0,1.9,1.92,1.9,1.92,47.0,47.5
+2020-01-05,New England Patriots,Buffalo Bills,-4.0,-4.5,1.91,1.91,1.91,1.91,41.0,40.5
+2019-11-03,London Monarchs,Buffalo Bills,1.0,1.0,1.91,1.91,1.91,1.91,40.0,40.0

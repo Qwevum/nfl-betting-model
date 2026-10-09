@@ -29,6 +29,54 @@ def spread_rows(oos: pd.DataFrame) -> pd.DataFrame:
         "y": (m["result"] > m["spread_line"]).to_numpy(float)})
 
 
+def market_rows(oos: pd.DataFrame, market: str) -> pd.DataFrame:
+    """Rows the offset calibration of `market` is fit on in model.fit (spread / total / ml)."""
+    if market == "spread":
+        return spread_rows(oos)
+    if market == "total":
+        t = oos.dropna(subset=["blend_total", "total", "total_line"])
+        t = t[t["total"] != t["total_line"]]
+        return pd.DataFrame({"game_id": t["game_id"].to_numpy(), "season": t["season"].to_numpy(),
+                             "x": logit(novig_first(t["over_odds"], t["under_odds"])),
+                             "edge": (t["blend_total"] - t["total_line"]).to_numpy(float),
+                             "y": (t["total"] > t["total_line"]).to_numpy(float)})
+    if market == "ml":
+        m = oos.dropna(subset=["blend_margin", "result", "spread_line"])
+        m = m[(m["result"] != 0) & m["home_moneyline"].notna() & m["away_moneyline"].notna()]
+        return pd.DataFrame({"game_id": m["game_id"].to_numpy(), "season": m["season"].to_numpy(),
+                             "x": logit(novig_first(m["home_moneyline"], m["away_moneyline"])),
+                             "edge": (m["blend_margin"] - m["spread_line"]).to_numpy(float),
+                             "y": (m["result"] > 0).to_numpy(float)})
+    raise ValueError(f"unknown market {market!r}")
+
+
+def c_interval(rows: pd.DataFrame, n: int = 1000, seed: int = 0, level: float = 0.95) -> dict:
+    """Offset-calibration c (log-odds per point of model edge) with a game-bootstrap CI."""
+    rng = np.random.default_rng(seed)
+    k = len(rows)
+    est = fit_offset(rows)
+    reps = [fit_offset(rows, rng.multinomial(k, np.full(k, 1 / k)).astype(float)) for _ in range(n)]
+    lo, hi = np.quantile(reps, [(1 - level) / 2, 1 - (1 - level) / 2])
+    return {"games": k, "c": est, "lo": float(lo), "hi": float(hi), "includes 0": bool(lo <= 0 <= hi)}
+
+
+def c_table(feat: pd.DataFrame, seasons: list[int], n: int = 1000, seed: int = 0) -> pd.DataFrame:
+    """Per walk-forward test season (model fit on earlier seasons, as validate.run does): the
+    offset c of each market with its game-bootstrap 95% CI over that model's inner
+    out-of-sample rows."""
+    played = feat[feat["result"].notna()]
+    first = int(played["season"].min())
+    out = []
+    for s in seasons:
+        train = played[(played["season"] < s) & (played["season"] > first)]
+        if train["season"].nunique() < 4:
+            continue
+        oos = inner_oos(train)
+        for mk in ("spread", "total", "ml"):
+            out.append({"test season": s, "market": mk, **c_interval(market_rows(oos, mk), n, seed)})
+    return pd.DataFrame(out)
+
+
 def fit_legacy(rows: pd.DataFrame, w: np.ndarray | None = None) -> np.ndarray:
     """[a, b, c] exactly as model.fit fits spread_cal (light ridge on the slopes)."""
     return _logistic_n(np.column_stack([rows["x"], rows["edge"]]), rows["y"].to_numpy(float), sw=w)
@@ -121,4 +169,4 @@ def compare_cover(p_legacy: pd.DataFrame, p_offset: pd.DataFrame, n_boot: int = 
     return pd.DataFrame(rows)
 
 
-__all__ = ["spread_rows", "fit_legacy", "fit_offset", "bootstrap", "by_era", "decompose", "compare_cover", "inner_oos"]
+__all__ = ["market_rows", "c_interval", "c_table", "spread_rows", "fit_legacy", "fit_offset", "bootstrap", "by_era", "decompose", "compare_cover", "inner_oos"]
