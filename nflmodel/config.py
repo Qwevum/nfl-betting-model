@@ -59,6 +59,17 @@ class Settings:
     # are actionable. Empty = every book counts as actionable (the report says so).
     actionable_books: str = ""
     watchlist_size: int = 10               # closest non-actionable candidates shown in the watchlist
+    # Forecast uncertainty (docs/UNCERTAINTY.md): time-blocked Bayesian bootstrap of the fitting
+    # stage. Intervals are conditional on the observed market snapshot. 0 replicates = off.
+    uncertainty_replicates: int = 100      # normal run (cached per training cutoff)
+    uncertainty_deep_replicates: int = 1000   # `--uncertainty deep`
+    uncertainty_level: float = 0.90        # level of probability, EV and outcome intervals
+    uncertainty_seed: int = 20261009       # replicate b uses the random stream (seed, b)
+    uncertainty_scheme: str = "season"     # block of games sharing one bootstrap weight
+    uncertainty_workers: int = 0           # parallel processes for replicate fits; 0 = automatic
+    # EXPERIMENTAL, off by default: also require the EV interval's lower bound to be above 0.
+    # Never lowers any existing threshold; it can only turn a candidate into NO BET.
+    experimental_ev_lower_bound_rule: bool = False
 
     def __post_init__(self):
         validate_settings(self)
@@ -85,7 +96,13 @@ _RULES = [
     ("kelly_fraction", float, 0, False, 1, True),
     ("max_stake_units", float, 0, False, 100, True),
     ("watchlist_size", int, 0, True, 200, True),
+    ("uncertainty_replicates", int, 0, True, 20000, True),
+    ("uncertainty_deep_replicates", int, 2, True, 20000, True),
+    ("uncertainty_level", float, 0, False, 1, False),
+    ("uncertainty_seed", int, 0, True, 2 ** 32 - 1, True),
+    ("uncertainty_workers", int, 0, True, 64, True),
 ]
+UNCERTAINTY_SCHEMES = {"game", "week4", "season", "season*week4"}
 
 PROBABILITY_MODELS = {"model", "market", "legacy"}
 _BOOK_KEY = re.compile(r"^[a-z0-9_]+$")
@@ -118,6 +135,10 @@ def validate_settings(s: Settings) -> None:
                       f"got {s.odds_api_regions!r}")
     if s.probability_model not in PROBABILITY_MODELS:
         errors.append(f"probability_model must be one of {sorted(PROBABILITY_MODELS)}, got {s.probability_model!r}")
+    if s.uncertainty_scheme not in UNCERTAINTY_SCHEMES:
+        errors.append(f"uncertainty_scheme must be one of {sorted(UNCERTAINTY_SCHEMES)}, got {s.uncertainty_scheme!r}")
+    if not isinstance(s.experimental_ev_lower_bound_rule, bool):
+        errors.append(f"experimental_ev_lower_bound_rule must be true or false, got {s.experimental_ev_lower_bound_rule!r}")
     if not isinstance(s.actionable_books, str):
         errors.append(f"actionable_books must be a comma-separated string, got {s.actionable_books!r}")
     else:

@@ -558,6 +558,75 @@ def cmd_compare_models(args):
     print(f"\nRecorded in logs/experiments.jsonl; report {out.relative_to(ROOT)}")
 
 
+STRESS_SHOCKS = {"tau_team_margin": 2.0, "tau_season_hfa": 1.0, "tau_team_total": 2.0, "tau_season_total": 2.0}
+
+
+def _require_commit() -> str:
+    version = track.model_version()
+    if version.endswith("-modified") or version == "unknown":
+        raise SystemExit("Evaluations are recorded against a commit; commit your changes first.")
+    return version
+
+
+def cmd_simulate_intervals(args):
+    """Known-truth simulation that selects the bootstrap block scheme (docs/UNCERTAINTY.md)."""
+    from nflmodel import fcvalidate as fv, uncertainty as unc
+    version = _require_commit()
+    settings = load_settings()
+    _, feat, _, _, _ = build(refresh=not args.no_refresh)
+    workers = args.workers or unc.default_workers()
+    print(f"Simulation: {args.sims} simulated histories x {args.replicates} replicates x {len(unc.SCHEMES)} schemes, "
+          f"{workers} worker(s) ...", flush=True)
+    a = fv.simulate(feat, (2011, 2020), 2021, R=args.sims, B=args.replicates, seed=settings.uncertainty_seed,
+                    workers=workers)
+    chosen = fv.select_scheme(a["table"])
+    runs = [("Scenario A: dependence estimated from real residuals (used for selection)", a)]
+    if not args.no_stress:
+        print("Sensitivity scenario with larger, fixed shocks ...", flush=True)
+        b = fv.simulate(feat, (2011, 2020), 2021, R=args.sims, B=args.replicates, seed=settings.uncertainty_seed + 1,
+                        workers=workers, shocks_override=STRESS_SHOCKS)
+        runs.append(("Scenario B (sensitivity only, not used for selection): larger fixed shocks", b))
+    md = fv.simulation_md(runs, chosen)
+    out = ROOT / "reports" / "uncertainty_simulation.md"
+    out.write_text(md + "\n", encoding="utf-8")
+    for name, r in runs:
+        fv.record({"period": "development-simulation", "seasons": [2011, 2021], "model_version": version,
+                   "passed": None, "verdict": f"selected {chosen[0]}: {chosen[1]}" if r is a else "sensitivity",
+                   "scenario": name, "R": r["R"], "B": r["B"], "seed": r["seed"],
+                   "shocks": {k: v for k, v in r["shocks"].items()},
+                   "table": r["table"].round(4).to_dict("records")})
+    print(md)
+    print(f"\nReport {out.relative_to(ROOT)}; recorded in logs/experiments.jsonl")
+
+
+def cmd_validate_forecasts(args):
+    """Out-of-sample evaluation of forecasts and intervals (development seasons; --holdout once)."""
+    from nflmodel import fcvalidate as fv, uncertainty as unc
+    version = _require_commit()
+    settings = load_settings()
+    _, feat, _, _, _ = build(refresh=not args.no_refresh)
+    last = int(feat.loc[feat["result"].notna(), "season"].max())
+    if args.holdout:
+        done = [r for r in fv.past_records("holdout")
+                if r.get("method") == unc.METHOD_VERSION and r.get("scheme") == settings.uncertainty_scheme]
+        if done:
+            raise SystemExit("This method and scheme were already evaluated on the holdout; the protocol allows one run.")
+        seasons, period = list(range(2022, last + 1)), "holdout"
+    else:
+        seasons, period = list(range(2015, 2022)), "development"
+    B = args.replicates if args.replicates is not None else settings.uncertainty_replicates
+    workers = args.workers or unc.default_workers()
+    print(f"Forecast validation, {period} seasons {seasons[0]}-{seasons[-1]}, {B} replicates, scheme "
+          f"{settings.uncertainty_scheme}, {workers} worker(s) ...", flush=True)
+    res = fv.evaluate(feat, seasons, settings, B=B, workers=workers)
+    md = fv.validation_md(res, settings, period)
+    out = ROOT / "reports" / f"forecast_validation_{'holdout' if args.holdout else 'dev'}.md"
+    out.write_text(md + "\n", encoding="utf-8")
+    fv.record(fv.summary_record(res, settings, period, version))
+    print(md)
+    print(f"\nReport {out.relative_to(ROOT)}; recorded in logs/experiments.jsonl")
+
+
 def cmd_check_live(args):
     """Diagnose the live bookmaker feed. Prints statistics only; writes nothing."""
     from nflmodel import apikey, livecheck
@@ -730,6 +799,15 @@ def main():
     ck.add_argument("--days", type=float, default=7, help="games kicking off within this many days")
     co = sub.add_parser("collect", help="snapshot odds + injury data for upcoming games (no model)")
     co.add_argument("--days", type=float, default=7, help="games kicking off within this many days")
+    si = sub.add_parser("simulate-intervals", help="known-truth simulation selecting the bootstrap scheme")
+    si.add_argument("--sims", type=int, default=60, help="simulated histories (default 60)")
+    si.add_argument("--replicates", type=int, default=50, help="bootstrap replicates per scheme (default 50)")
+    si.add_argument("--workers", type=int, default=0, help="parallel processes (default: automatic)")
+    si.add_argument("--no-stress", action="store_true", help="skip the larger-shock sensitivity scenario")
+    vf = sub.add_parser("validate-forecasts", help="out-of-sample forecast and interval evaluation")
+    vf.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
+    vf.add_argument("--replicates", type=int, help="bootstrap replicates (default: uncertainty_replicates)")
+    vf.add_argument("--workers", type=int, default=0, help="parallel processes (default: automatic)")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
     t.add_argument("--week", type=int); t.add_argument("--season", type=int)
     for s in sub.choices.values():
@@ -745,7 +823,8 @@ def main():
      "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log,
      "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live,
      "compare-models": cmd_compare_models,
-     "coverage": cmd_coverage}[args.cmd](args)
+     "coverage": cmd_coverage, "simulate-intervals": cmd_simulate_intervals,
+     "validate-forecasts": cmd_validate_forecasts}[args.cmd](args)
 
 
 if __name__ == "__main__":
