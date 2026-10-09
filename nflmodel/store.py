@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FORECASTS = ROOT / "logs" / "forecasts.jsonl"
 LEDGER = ROOT / "logs" / "ledger.jsonl"
 COLLECTIONS = ROOT / "logs" / "collections.jsonl"
+WEATHER_ARCHIVE = ROOT / "logs" / "weather_forecasts.jsonl"
 SNAPSHOTS = ROOT / "snapshots"
 GENESIS = "0" * 64
 
@@ -205,3 +206,27 @@ def ledger_frame(ledger_path: Path = LEDGER) -> pd.DataFrame:
     df = pd.DataFrame(placed)
     df["voided"] = df["bet_id"].map(voided)
     return df
+
+
+# ---------------------------------------------------------------- weather archive
+
+WEATHER_FIELDS = ["game_id", "kickoff_utc", "valid_for_utc", "wind_mph", "temp_f", "source", "forecast_utc",
+                  "retrieved_utc"]
+
+
+def archive_weather(accepted: dict, run_id: str, path: Path = WEATHER_ARCHIVE) -> int:
+    """Append validated forecasts (issue, retrieval and valid-for times, source, game time) so a
+    future weather feature can be evaluated on forecasts that existed before kickoff.
+    Identical forecasts already archived are not duplicated. Returns rows added."""
+    seen = {tuple(r["data"].get(k) for k in WEATHER_FIELDS) for r in read(path)}
+    rows = []
+    for w in accepted.values():
+        d = {k: _clean(w.get(k)) for k in WEATHER_FIELDS}
+        key = tuple(d.get(k) for k in WEATHER_FIELDS)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({**d, "run_id": run_id})
+    if rows:
+        append(path, "weather_forecast", rows)
+    return len(rows)

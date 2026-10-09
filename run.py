@@ -91,7 +91,8 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
             notes.append(f"{x.file} row rejected ({x.game_id}{', ' + x.team if isinstance(x.team, str) else ''}): "
                          f"{x.reason}")
         day = inputs.apply_qb_overrides(day, overrides, games, qbr)
-        day = inputs.apply_weather(day, weather)
+        # Weather is NOT applied to the model: wind/temperature are not features. A valid
+        # forecast only lifts the "no outdoor total without a forecast" rule (decide.py).
 
     refs_by_game: dict = {}
     if live:
@@ -188,6 +189,9 @@ def record(rows, preds, art, settings, now, args, games) -> None:
                     home_team=rows["game_id"].map(dict(zip(preds["game_id"], preds["home_team"])))),
         {"run_utc": run_utc, "run_id": run_id, "model_version": version, "snapshot_id": sid,
          "horizon_minutes": settings.horizon_minutes})
+    if len(art.get("weather_accepted", [])):
+        n = store.archive_weather({w["game_id"]: w for w in art["weather_accepted"].to_dict("records")}, run_id)
+        print(f"Archived {n} new weather forecast(s) to {store.WEATHER_ARCHIVE.relative_to(ROOT)}")
     ex = sum(r["data"]["tier"] == "executable" for r in recs)
     cond = sum(r["data"]["tier"] == "conditional" for r in recs)
     print(f"Recorded {len(recs)} forecasts ({ex} executable, {cond} conditional) to "
@@ -439,23 +443,29 @@ def cmd_collect(args):
     valid, rejected = validate_offers(books, kick, now, settings)
     season = int(window["season"].iloc[0])
     inj = load_injuries(season, refresh=not args.no_refresh)
+    weather, rej_wx = inputs.load_weather(window, settings, now)
     save_sources()
     run_utc = fmt(now)
     run_id = "collect_" + run_utc.replace(":", "").replace("-", "")
     sid, d = store.save_snapshot(
         run_id,
         files={"sources.json": ROOT / "data" / "sources.json", "injuries.parquet": ROOT / "data" / f"injuries_{season}.parquet",
-               "odds_manual.csv": ROOT / "odds_manual.csv"},
+               "odds_manual.csv": ROOT / "odds_manual.csv", "weather_manual.csv": ROOT / "weather_manual.csv"},
         frames={"schedule_rows.csv": window, "offers_raw.csv": books, "offers_valid.csv": valid,
-                "offers_rejected.csv": rejected, "consensus.csv": consensus},
+                "offers_rejected.csv": rejected, "consensus.csv": consensus, "inputs_rejected.csv": rej_wx,
+                "weather_accepted.csv": pd.DataFrame(list(weather.values()))},
         meta={"run_utc": run_utc, "settings": vars(settings), "notes": notes})
     store.append(store.COLLECTIONS, "collection", [{
         "run_id": run_id, "snapshot_id": sid, "run_utc": run_utc, "games": int(len(window)),
         "valid_quotes": int(len(valid)), "rejected_quotes": int(len(rejected)),
         "books": int(valid["book"].nunique()) if len(valid) else 0, "injury_rows": int(len(inj))}],
         recorded_utc=run_utc)
+    n_wx = store.archive_weather(weather, run_id) if weather else 0
+    for x in rej_wx.itertuples(index=False):
+        notes.append(f"{x.file} row rejected ({x.game_id}): {x.reason}")
     for n in notes:
         print(f"  ! {n}")
+    print(f"Weather: {len(weather)} valid forecast(s), {n_wx} newly archived, {len(rej_wx)} rejected")
     print(f"Collected {len(window)} games, {len(valid)} valid / {len(rejected)} rejected quotes, "
           f"{len(inj)} injury rows -> {d.relative_to(ROOT)}")
 
@@ -526,7 +536,7 @@ def cmd_void(args):
 def cmd_verify_log(args):
     bad = False
     from nflmodel import experiment
-    for path in (store.FORECASTS, store.LEDGER, store.COLLECTIONS, experiment.LOG):
+    for path in (store.FORECASTS, store.LEDGER, store.COLLECTIONS, experiment.LOG, store.WEATHER_ARCHIVE):
         ok, msg = store.verify(path)
         bad |= not ok
         print(f"{path.relative_to(ROOT)}: {'OK' if ok else 'FAILED'} - {msg}")

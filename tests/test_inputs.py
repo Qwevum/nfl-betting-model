@@ -146,3 +146,34 @@ class RejectedInputsCannotUnlock(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WeatherIsNotAModelInput(unittest.TestCase):
+    def test_wind_not_in_features_and_not_applied(self):
+        from nflmodel.ratings import EXPERIMENT_GROUPS, FEATURES, TOTAL_FEATURES
+        self.assertNotIn("t_wind", TOTAL_FEATURES)
+        self.assertNotIn("t_wind", FEATURES)
+        self.assertFalse(hasattr(inputs, "apply_weather"))
+        self.assertFalse(any("t_wind" in m + t for m, t in EXPERIMENT_GROUPS.values()))
+
+    def test_report_states_forecast_only_unlocks_total(self):
+        good, _ = load("wx", wx_file([GOOD_WX]))
+        g = game_row()._replace(roof="outdoors", game_id=GID)
+        ctx = build_context(g, pd.DataFrame(), {}, {"f_qb": 0.0, "f_hfa": 2.0}, 0.0, {}, good, S, injury_feed_ok=False)
+        self.assertTrue(any("not a model input" in a for a in ctx.assumptions))
+        self.assertTrue(any("issued 2026-10-11T12:00:00Z" in f and "retrieved" in f for f in ctx.facts))
+
+
+class WeatherArchive(unittest.TestCase):
+    def test_archives_valid_forecasts_once_with_all_times(self):
+        from nflmodel import store
+        good, _ = load("wx", wx_file([GOOD_WX]))
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "w.jsonl"
+            self.assertEqual(store.archive_weather(good, "run1", p), 1)
+            self.assertEqual(store.archive_weather(good, "run2", p), 0)      # identical forecast not duplicated
+            rec = store.read(p)[0]["data"]
+            for k in ("forecast_utc", "retrieved_utc", "valid_for_utc", "kickoff_utc", "source", "wind_mph"):
+                self.assertIsNotNone(rec[k], k)
+            self.assertEqual(rec["kickoff_utc"], KICK)
+            self.assertTrue(store.verify(p)[0])

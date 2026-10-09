@@ -188,12 +188,15 @@ def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: fl
     outdoor = roof not in ("dome", "closed")
     if g.game_id in weather:
         w = weather[g.game_id]
-        c.facts.append(f"Forecast wind {w['wind_mph']} mph, temp {w['temp_f']} F "
-                       f"[{w.get('source') or 'weather_manual.csv'}, forecast issued {w['forecast_utc']}]")
+        c.facts.append(f"Forecast wind {w['wind_mph']:g} mph, temp {w['temp_f']:g} F for {w['valid_for_utc']} "
+                       f"[{w['source']}, issued {w['forecast_utc']}, retrieved {w['retrieved_utc']}]")
+        c.assumptions.append("Weather is not a model input: this forecast only permits betting the total; "
+                             "the fair total is the same with or without it")
     elif outdoor:
         c.missing.append("Weather forecast (wind matters for totals) - "
                          + ("roof status not listed" if roof is None else "outdoor stadium"))
-        c.block["total"].append("no weather forecast for an outdoor/unknown-roof game")
+        c.block["total"].append("no valid weather forecast for an outdoor/unknown-roof game (a forecast "
+                                "only unlocks the total; it does not change the model's number)")
 
     gap = abs(g.model_margin - g.spread_line) if pd.notna(g.spread_line) else 0.0
     if gap >= settings.gap_points:

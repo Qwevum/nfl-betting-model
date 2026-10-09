@@ -506,3 +506,41 @@ the model's own-line error but don't improve the market-anchored probabilities.
 * Replay at 2026-10-11T12:30Z with three QB rows and three weather rows: the
   blank-source and future-dated QB rows, the negative-wind forecast and the
   stale forecast were rejected and listed; only the valid rows were applied.
+
+## 10. Explicit weather handling and an archive of valid forecasts
+
+**Problem:**
+* Reports didn't say that weather is not a model feature.
+* `apply_weather()` still wrote forecast wind into a column the model no longer
+  reads, which wrongly suggested it affected predictions.
+* Forecasts were not archived, so a weather feature could never be evaluated on
+  real pre-game forecasts.
+
+**Files:** `nflmodel/inputs.py` (removed `apply_weather`), `nflmodel/decide.py`,
+`nflmodel/store.py`, `run.py` (`record`, `collect`, `verify-log`), `README.md`,
+`tests/test_inputs.py`.
+
+**Change:**
+* Every report with a forecast states that weather is not a model input and
+  only permits betting the total. The no-forecast block says the same.
+* Accepted forecasts go to `logs/weather_forecasts.jsonl` (hash-chained, no
+  duplicates) with:
+  * game id and kickoff
+  * valid-for time
+  * wind and temperature
+  * source
+  * issue and retrieval times
+  * run id
+* Both `predict` (prospective runs only) and `collect` write to it, and
+  `collect` validates weather too.
+* No weather adjustment was added, and observed weather was not restored to
+  training.
+
+**Verification:** 3 new tests:
+* `t_wind` is in no feature list or experiment group, and `apply_weather` is gone
+* the report states that the forecast only unlocks the total, and shows its
+  issue and retrieval times
+* the archive stores all times, doesn't duplicate an identical forecast and
+  verifies
+
+The suite passes: 81 tests.

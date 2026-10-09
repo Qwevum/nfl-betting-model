@@ -80,6 +80,22 @@ consensus is used as a fallback. `--now 2026-10-11T15:00:00Z` replays a run
 at a fixed time; such runs, and runs from uncommitted code, write to `reports/dev/`
 and are never logged.
 
+## Weather
+
+* **Not a model input.** Wind and temperature are not features: observed
+  game-time weather was removed because it is postgame knowledge, and no
+  historical forecasts exist to train on.
+* **What a forecast does.** A valid row in `weather_manual.csv` only permits
+  betting the total of an outdoor or unknown-roof game. The model's total is
+  identical with or without it.
+* **Validation.** Forecasts are checked against the decision time and kickoff
+  (issued at most `weather_max_age_minutes` = 12 h earlier; valid-for time
+  within 3 h of kickoff; wind ≥ 0; plausible temperature).
+* **Archive.** Accepted forecasts are archived in `logs/weather_forecasts.jsonl`
+  with issue time, retrieval time, valid-for time, kickoff and source. A future
+  weather feature can then be evaluated on forecasts that really existed before
+  each game.
+
 ## Data sources
 
 All from the [nflverse](https://github.com/nflverse) project. Each run records

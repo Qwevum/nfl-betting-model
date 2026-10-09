@@ -108,7 +108,7 @@ def load_qb_overrides(day: pd.DataFrame, settings, decision_utc: pd.Timestamp, p
         if (r.game_id, r.team) in out:
             _reject(rejected, path.name, r, "duplicate override for this game and team; the first row is used", r.team)
             continue
-        out[(r.game_id, r.team)] = {**r._asdict(), "confirmed_utc": fmt(t)}
+        out[(r.game_id, r.team)] = {**r._asdict(), "kickoff_utc": fmt(kick[r.game_id]), "confirmed_utc": fmt(t)}
     return out, pd.DataFrame(rejected, columns=REJECT_COLS)
 
 
@@ -166,7 +166,8 @@ def load_weather(day: pd.DataFrame, settings, decision_utc: pd.Timestamp, path: 
         if r.game_id in out:
             _reject(rejected, path.name, r, "duplicate forecast for this game; the first row is used")
             continue
-        out[r.game_id] = {**r._asdict(), "wind_mph": wind, "temp_f": temp, "forecast_utc": fmt(issued),
+        out[r.game_id] = {**r._asdict(), "kickoff_utc": fmt(k), "wind_mph": wind, "temp_f": temp,
+                          "forecast_utc": fmt(issued),
                           "retrieved_utc": fmt(retrieved), "valid_for_utc": fmt(valid_for)}
     return out, pd.DataFrame(rejected, columns=REJECT_COLS)
 
@@ -194,15 +195,6 @@ def apply_qb_overrides(rows: pd.DataFrame, overrides: dict, games: pd.DataFrame,
             rows.loc[m, f"{side}_qb_rating"] = rating
             rows.loc[m, f"{side}_qb_delta"] = rating - base
     rows["f_qb"] = rows["home_qb_delta"].fillna(0) - rows["away_qb_delta"].fillna(0)
-    return rows
-
-
-def apply_weather(rows: pd.DataFrame, weather: dict) -> pd.DataFrame:
-    if not weather:
-        return rows
-    rows = rows.copy()
-    for gid, r in weather.items():
-        rows.loc[rows["game_id"] == gid, "t_wind"] = float(r["wind_mph"])
     return rows
 
 
