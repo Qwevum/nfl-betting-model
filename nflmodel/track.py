@@ -57,25 +57,81 @@ def _clv(r) -> float:
     return np.nan
 
 
-def at_horizon(fc: pd.DataFrame, horizon_minutes: float) -> pd.DataFrame:
-    """Latest forecast per game/market/side recorded at or before kickoff - horizon."""
+def issue_time(fc: pd.DataFrame) -> pd.Series:
+    """When a forecast was actually available: the later of its recorded time and its
+    prediction-completion time. Legacy rows (before the timestamp fix) only carry the
+    run START time, so their issue time is unknown (NaT)."""
+    rec = pd.to_datetime(fc["recorded_utc"].map(parse_utc), utc=True)
+    if "prediction_completed_utc" not in fc:
+        return pd.Series(pd.NaT, index=fc.index, dtype="datetime64[ns, UTC]")
+    done = pd.to_datetime(fc["prediction_completed_utc"].map(lambda v: parse_utc(v) if isinstance(v, str) else None),
+                          utc=True)
+    issued = rec.where(rec >= done, done)
+    return issued.where(done.notna(), pd.NaT)
+
+
+def at_horizon(fc: pd.DataFrame, settings) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Select, per game, ONE run whose forecasts were issued inside the horizon window.
+
+    Window: [kickoff - horizon - tolerance, kickoff - horizon]. Forecasts issued after
+    the cutoff (including runs that completed late) or before the window start (e.g.
+    days earlier) are excluded. Among eligible runs the latest is used for every side
+    of that game, so sides from different runs are never mixed.
+
+    Returns (selected rows with lead_minutes, per-game coverage table with reasons)."""
+    cols = ["game_id", "kickoff_utc", "status", "runs_considered", "selected_run", "lead_minutes", "reason"]
     if fc.empty:
-        return fc
-    rec = fc["recorded_utc"].map(parse_utc)
-    cut = fc["kickoff_utc"].map(parse_utc) - pd.Timedelta(minutes=horizon_minutes)
-    fc = fc[rec <= cut].assign(_rec=rec[rec <= cut])
-    return fc.sort_values("_rec").groupby(["game_id", "market", "side"]).tail(1).drop(columns="_rec")
+        return fc, pd.DataFrame(columns=cols)
+    fc = fc.copy()
+    fc["_issued"] = issue_time(fc)
+    fc["_kick"] = pd.to_datetime(fc["kickoff_utc"].map(parse_utc), utc=True)
+    fc["_run"] = fc["run_id"] if "run_id" in fc else None
+    fc["_run"] = fc["_run"].where(fc["_run"].notna(), "legacy@" + fc["recorded_utc"])
+    cutoff = fc["_kick"] - pd.Timedelta(minutes=settings.horizon_minutes)
+    start = cutoff - pd.Timedelta(minutes=settings.horizon_tolerance_minutes)
+    fc["_lead"] = (fc["_kick"] - fc["_issued"]).dt.total_seconds() / 60
+    fc["_ok"] = fc["_issued"].notna() & (fc["_issued"] >= start) & (fc["_issued"] <= cutoff)
+
+    picked, cov = [], []
+    for gid, g in fc.groupby("game_id"):
+        runs = g.groupby("_run").agg(issued=("_issued", "max"), ok=("_ok", "all"), lead=("_lead", "min"))
+        ok = runs[runs["ok"]]
+        row = {"game_id": gid, "kickoff_utc": g["kickoff_utc"].iloc[0], "runs_considered": len(runs)}
+        if len(ok):
+            run = ok["issued"].idxmax()
+            sel = g[g["_run"] == run]
+            picked.append(sel.assign(lead_minutes=sel["_lead"]))
+            cov.append({**row, "status": "eligible", "selected_run": run, "lead_minutes": float(ok.loc[run, "lead"]),
+                        "reason": ""})
+            continue
+        if runs["issued"].isna().all():
+            why = "only legacy forecasts (pre-fix run-start timestamps; completion time unknown)"
+        elif (runs["lead"] < settings.horizon_minutes).all():
+            why = f"all forecasts issued after the cutoff (kickoff - {settings.horizon_minutes:g} min)"
+        else:
+            why = (f"no forecast issued inside the {settings.horizon_tolerance_minutes:g}-min window "
+                   f"(closest lead {runs['lead'].dropna().min():.0f} min)" if runs["lead"].notna().any()
+                   else "no usable issue time")
+        cov.append({**row, "status": "excluded", "selected_run": None, "lead_minutes": np.nan, "reason": why})
+    sel = pd.concat(picked, ignore_index=True) if picked else fc.iloc[0:0].assign(lead_minutes=np.nan)
+    sel = sel.drop(columns=[c for c in sel.columns if c.startswith("_")])
+    return sel, pd.DataFrame(cov, columns=cols)
 
 
-def grade_all(games: pd.DataFrame, horizon_minutes: float, forecasts_path: Path = store.FORECASTS,
+def grade_all(games: pd.DataFrame, settings, forecasts_path: Path = store.FORECASTS,
               ledger_path: Path = store.LEDGER) -> dict:
     out = {}
     fc = store.forecasts_frame(forecasts_path)
     if not fc.empty:
-        h = _results(at_horizon(fc, horizon_minutes), games)
-        h["clv"] = h.apply(_clv, axis=1)
-        h["flat_units"] = [profit(r, p) if r else np.nan for r, p in zip(h["result"], h["price"])]
-        out["forecasts"] = h
+        sel, cov = at_horizon(fc, settings)
+        played = set(games.loc[games["result"].notna(), "game_id"]) if "result" in games else set()
+        cov["played"] = cov["game_id"].isin(played)
+        out["coverage"] = cov
+        if len(sel):
+            h = _results(sel, games)
+            h["clv"] = h.apply(_clv, axis=1)
+            h["flat_units"] = [profit(r, p) if r else np.nan for r, p in zip(h["result"], h["price"])]
+            out["forecasts"] = h
     led = store.ledger_frame(ledger_path)
     if not led.empty:
         led = _results(led[led["voided"].isna()].copy(), games)
@@ -86,25 +142,52 @@ def grade_all(games: pd.DataFrame, horizon_minutes: float, forecasts_path: Path 
     return out
 
 
-def report(g: dict, horizon_minutes: float) -> None:
-    fc = g.get("forecasts")
-    print(f"\n1) FORECAST QUALITY at the {horizon_minutes:g}-minute horizon")
-    if fc is None or fc.empty:
-        print("   no forecasts recorded at or before the horizon yet")
+def score_table(fc: pd.DataFrame) -> pd.DataFrame:
+    """Model vs market on identical graded rows, by market and model version."""
+    done = fc[fc["result"].isin(["W", "L"])].dropna(subset=["model_prob", "market_prob"])
+    done = done.assign(model_version=done["model_version"].fillna("unknown") if "model_version" in done
+                       else "unknown")
+    rows = []
+    if done.empty:
+        return pd.DataFrame(rows)
+    for (market, version), g in done.groupby(["market", "model_version"]):
+        y = (g["result"] == "W").to_numpy(float)
+        bm, lm = metrics.brier_logloss(g["model_prob"], y)
+        bk, lk = metrics.brier_logloss(g["market_prob"], y)
+        rows.append({"market": market, "model_version": version, "games": g["game_id"].nunique(), "sides": len(g),
+                     "model_brier": bm, "market_brier": bk, "model_logloss": lm, "market_logloss": lk})
+    return pd.DataFrame(rows)
+
+
+def report(g: dict, settings) -> None:
+    fc, cov = g.get("forecasts"), g.get("coverage")
+    lo = settings.horizon_minutes + settings.horizon_tolerance_minutes
+    print(f"\n1) FORECAST QUALITY: one run per game issued {lo:g}-{settings.horizon_minutes:g} min before kickoff")
+    if cov is None or cov.empty:
+        print("   no forecasts recorded yet")
     else:
-        done = fc[fc["result"].isin(["W", "L"])].dropna(subset=["model_prob", "market_prob"])
-        n_games = done["game_id"].nunique()
-        print(f"   {len(fc)} sides recorded, {len(done)} graded from {n_games} game(s) (pushes and rows without "
-              "a market reference excluded; model and market scored on the same rows)")
-        if n_games < 50:
-            print(f"   ! only {n_games} game(s): far too few to distinguish model from market")
-        if len(done):
-            y = (done["result"] == "W").to_numpy(float)
-            for name, col in (("model", "model_prob"), ("market reference", "market_prob")):
-                b, l = metrics.brier_logloss(done[col], y)
-                print(f"   {name:18s} Brier {b:.4f}  log loss {l:.4f}")
-    print("\n2) RECOMMENDATIONS (hypothetical, flat 1u; these are NOT wagers)")
-    if fc is not None and not fc.empty:
+        el, ex = cov[cov["status"] == "eligible"], cov[cov["status"] == "excluded"]
+        print(f"   games with forecasts: {len(cov)}; eligible {len(el)}; excluded {len(ex)}; "
+              f"eligible and played {int((el['played']).sum())}")
+        for why, n in ex["reason"].value_counts().items():
+            print(f"     excluded ({n}): {why}")
+        if len(el):
+            lead = el["lead_minutes"]
+            print(f"   actual lead times of selected runs: min {lead.min():.0f}, median {lead.median():.0f}, "
+                  f"max {lead.max():.0f} min before kickoff")
+    if fc is not None and len(fc):
+        t = score_table(fc)
+        if t.empty:
+            print("   no graded eligible rows with both model and market probabilities yet")
+        else:
+            print("   model vs market on identical graded rows:")
+            print("   " + t.round(4).to_string(index=False).replace("\n", "\n   "))
+            if t["games"].sum() < 50:
+                print("   ! fewer than 50 games: far too few to distinguish model from market")
+    print("\n2) RECOMMENDATIONS (hypothetical, flat 1u; these are NOT wagers), from the selected runs")
+    if fc is None or fc.empty:
+        print("   none")
+    else:
         flag = fc["is_best_side"] if "is_best_side" in fc else pd.Series(np.nan, index=fc.index)
         derived = fc.index.isin(fc.sort_values("ev", ascending=False)
                                   .groupby(["game_id", "market"]).head(1).index)

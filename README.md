@@ -228,7 +228,13 @@ results in `docs/EXPERIMENTS.md`):
   `python run.py place --forecast <id> --stake <units> [--price ...]`. The id
   is printed by `predict`. `void` records cancellations.
 * **`python run.py grade`** reports three things separately:
-  1. forecast quality at the 60-minute horizon
+  1. forecast quality at the horizon. Only forecasts **issued** inside
+     `[kickoff − horizon − tolerance, kickoff − horizon]` count (default 75–60
+     min). Issued means the later of recording and prediction completion, so a
+     late-finishing run can't qualify. The latest eligible run is used for all
+     of a game's sides (never mixed), and the report lists eligible and
+     excluded games with reasons and the actual lead times. Model and market
+     are scored on identical rows, by market and model version
   2. hypothetical recommendations by tier (not wagers)
   3. actual wagers: ROI, drawdown and CLV
 

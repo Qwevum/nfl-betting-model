@@ -11,6 +11,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nflmodel import metrics, store, track  # noqa: E402
+from nflmodel.config import Settings  # noqa: E402
 
 KICK = "2026-10-11T17:00:00Z"
 
@@ -116,18 +117,12 @@ class Ledger(unittest.TestCase):
                  home_moneyline=250, away_moneyline=-300),   # MIA lost by 3: +7 wins
             dict(game_id="2026_05_PHI_JAX", home_score=24, away_score=17, spread_line=7, total_line=44,
                  home_moneyline=-300, away_moneyline=250)])  # JAX by exactly 7: push
-        g = track.grade_all(games, 60, forecasts_path=self.f, ledger_path=self.l)
+        g = track.grade_all(games, Settings(), forecasts_path=self.f, ledger_path=self.l)
         led = g["ledger"].set_index("bet_id")
         self.assertNotIn(b3, led.index)                                # voided bet excluded
         self.assertAlmostEqual(led.loc[b1, "units"], 2.0 * 100 / 110)
         self.assertEqual(sorted(led["result"]), ["P", "W"])
         self.assertAlmostEqual(led["units"].sum(), 2.0 * 100 / 110)
-
-    def test_forecast_horizon_selection(self):
-        store.append(self.f, "forecast", [forecast(price=-120)], recorded_utc="2026-10-11T16:30:00Z")  # inside 60 min
-        h = track.at_horizon(store.forecasts_frame(self.f), 60)
-        row = h[(h["game_id"] == "2026_05_CIN_MIA") & (h["side"] == "home")]
-        self.assertEqual(row["price"].iloc[0], -110)                    # the 16:30 forecast is after the horizon
 
 
 class Metrics(unittest.TestCase):
@@ -159,10 +154,12 @@ class LegacyRows(unittest.TestCase):
             rows = [forecast(decision="NO BET", ev=-0.01), forecast(side="away", decision="NO BET", ev=-0.03)]
             for r in rows:
                 r.pop("is_best_side")
-            store.append(f, "forecast", rows, recorded_utc="2026-10-11T15:00:00Z")
+                r.update(run_id="r1", prediction_completed_utc="2026-10-11T15:50:00Z")
+            store.append(f, "forecast", rows, recorded_utc="2026-10-11T15:50:00Z")
             games = pd.DataFrame([dict(game_id="2026_05_CIN_MIA", home_score=17, away_score=20, spread_line=-7,
                                        total_line=44, home_moneyline=250, away_moneyline=-300)])
-            g = track.grade_all(games, 60, forecasts_path=f, ledger_path=Path(d) / "l.jsonl")
+            g = track.grade_all(games, Settings(), forecasts_path=f, ledger_path=Path(d) / "l.jsonl")
             for r in g["forecasts"].to_dict("records"):
                 r.setdefault("tier", "pass")
-            track.report({"forecasts": g["forecasts"].assign(tier="pass")}, 60)   # must not raise
+            track.report({"forecasts": g["forecasts"].assign(tier="pass"), "coverage": g["coverage"]},
+                         Settings())   # must not raise

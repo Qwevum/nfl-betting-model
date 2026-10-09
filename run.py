@@ -535,8 +535,8 @@ def cmd_grade(args):
         print(f"{path.relative_to(ROOT)}: {msg}")
         if not ok:
             raise SystemExit("integrity check failed; not grading")
-    g = track.grade_all(games, settings.horizon_minutes)
-    track.report(g, settings.horizon_minutes)
+    g = track.grade_all(games, settings)
+    track.report(g, settings)
     for name, df in g.items():
         df.to_csv(ROOT / "logs" / f"graded_{name}.csv", index=False)
 

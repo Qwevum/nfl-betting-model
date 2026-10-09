@@ -37,6 +37,7 @@ class Settings:
     min_reference_books: int = 2           # other books needed for a reference (leave-one-book-out)
     # Prediction horizon: forecasts are meant to be made this long before kickoff
     horizon_minutes: float = 60.0
+    horizon_tolerance_minutes: float = 15.0   # eligible forecasts: [kickoff-horizon-tol, kickoff-horizon]
     # Decisions
     min_edge: float = 0.02                 # EV per unit staked required to bet
     gap_points: float = 4.0                # model-vs-market gap (pts) that blocks a bet as unexplained
@@ -60,6 +61,7 @@ _RULES = [
     ("weather_max_age_minutes", float, 0, False, 7 * 24 * 60, True),
     ("weather_valid_window_minutes", float, 0, False, 24 * 60, True),
     ("horizon_minutes", float, 0, False, 7 * 24 * 60, True),
+    ("horizon_tolerance_minutes", float, 0, False, 7 * 24 * 60, True),
     ("min_edge", float, 0, True, 1, False),
     ("gap_points", float, 0, False, 60, True),
     ("kelly_fraction", float, 0, False, 1, True),

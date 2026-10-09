@@ -597,3 +597,46 @@ The suite passes: 81 tests.
 **Historical records:** the 90 legacy forecasts keep their original
 run-start stamps (unchanged, flagged `legacy`). They predate this fix, and all
 fall days before kickoff.
+
+## 12. Horizon evaluation: an eligibility window and one run per game
+
+**Problem:** `track.at_horizon()` took the latest forecast at or before
+kickoff − 60 min. That included forecasts made days earlier: the Oct 7 legacy
+forecasts were being scored as 60-minute-horizon forecasts. It also used the
+recorded time, which before change 11 was the run start, and it could mix
+sides from different runs for one game.
+
+**Files:** `nflmodel/track.py`, `nflmodel/config.py`
+(`horizon_tolerance_minutes = 15`), `run.py`, `README.md`,
+`tests/test_horizon.py` (new), `tests/test_store.py` (updated to the new API;
+the old test asserted the flawed behaviour).
+
+**Change:**
+* **Issue time** = the later of `recorded_utc` and
+  `prediction_completed_utc`. Legacy rows, which have only a run-start stamp,
+  have an unknown issue time and are excluded with that reason.
+* **Eligible** = issued in `[kickoff − horizon − tolerance, kickoff − horizon]`.
+* **Per game**, the latest eligible run is selected and all of that game's
+  sides come from it.
+* **Coverage table:** eligible or excluded with a reason, runs considered, the
+  selected run, lead time, and whether the game has been played.
+* **Scores:** model vs market on identical graded rows, by market and model
+  version.
+
+**Verification:**
+* 8 new tests:
+  * a week-old forecast fails the window
+  * 70 min is eligible and 55 min is excluded after the cutoff
+  * the tolerance is configurable
+  * a late-completing run, and a record written after its claimed completion,
+    are both excluded
+  * legacy rows are excluded with a reason
+  * the latest eligible run supplies all sides (no mixing)
+  * games are selected independently
+  * scoring drops rows without a market reference for both arms, by market
+    and version
+
+  The suite passes: 97 tests.
+* `grade` on the real history: 15 games, all excluded ("only legacy
+  forecasts"). Previously the TB @ DAL forecasts recorded ~52 hours before
+  kickoff were scored.
