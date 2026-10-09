@@ -27,6 +27,7 @@ books), so they are compared with P(win) / (1 - P(tie)).
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -278,7 +279,12 @@ def forecast_slate(model: FittedModel, day: pd.DataFrame, refs_all: dict | None,
     #    (mixture over replicates when available, else the point model's distribution)
     for name, support, P, R in (("margin", MARGINS, pt.pmf_margin, [r.pmf_margin for r in reps]),
                                 ("total", TOTALS, pt.pmf_total, [r.pmf_total for r in reps])):
-        mix = np.nanmean(np.array(R), axis=0) if len(R) >= 2 else P
+        if len(R) >= 2:
+            with np.errstate(invalid="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)     # rows with no distribution stay NaN
+                mix = np.nanmean(np.array(R), axis=0)
+        else:
+            mix = P
         kind = ("predictive mixture over replicates" if len(R) >= 2
                 else "plug-in (point model; parameter uncertainty not included)")
         valid = np.all(np.isfinite(mix), axis=1) & np.all(np.isfinite(P), axis=1)

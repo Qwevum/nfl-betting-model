@@ -24,6 +24,9 @@ from .timeutil import fmt, now_utc, parse_utc
 
 ROOT = Path(__file__).resolve().parent.parent
 FORECASTS = ROOT / "logs" / "forecasts.jsonl"
+# Game forecasts (one record per game, independent of betting); added 2026-10. Separate from
+# forecasts.jsonl so betting-side readers never see a different record shape.
+GAME_FORECASTS = ROOT / "logs" / "game_forecasts.jsonl"
 LEDGER = ROOT / "logs" / "ledger.jsonl"
 COLLECTIONS = ROOT / "logs" / "collections.jsonl"
 WEATHER_ARCHIVE = ROOT / "logs" / "weather_forecasts.jsonl"
@@ -124,6 +127,18 @@ FORECAST_FIELDS = ["game_id", "kickoff_utc", "season", "week", "away_team", "hom
                    "ev[fair 0.5 worse]", "ev[market only]", "min_price", "decision", "stake_units",
                    "reasons", "is_best_side", "market_cal_prob", "probability_model", "ev_raw_market",
                    "venue_ok", "blocks", "conditions", "category"]
+# Added 2026-10 (forecast uncertainty). Older records do not have them; readers must treat
+# missing values as "not computed", never as zero.
+UNCERTAINTY_FIELDS = ["p_lose", "p_win_lo", "p_win_hi", "ev_lo", "ev_hi", "ev_sd", "ev_replicates", "unc_level",
+                      "unc_status", "unc_method", "unc_scheme", "unc_seed", "unc_train_hash"]
+FORECAST_FIELDS = FORECAST_FIELDS + UNCERTAINTY_FIELDS
+
+GAME_FORECAST_FIELDS = [
+    "game_id", "kickoff_utc", "season", "week", "away_team", "home_team", "postseason", "margin_basis",
+    "margin_source", "total_basis", "total_source", "winner", "p_winner", "p_home", "p_away", "p_tie",
+    "p_home_lo", "p_home_hi", "p_home_sd_logit", "p_away_lo", "p_away_hi", "p_away_sd_logit",
+    "margin_mean", "margin_median", "total_mean", "total_median", "margin_pi_kind", "total_pi_kind",
+    "level", "replicates", "unc_status"]
 
 TIER = {"BET": "executable", "BET IF CONFIRMED": "conditional",
         "BET IF PRICE AVAILABLE": "conditional", "NO BET": "pass"}
@@ -142,6 +157,24 @@ def record_forecasts(rows: pd.DataFrame, run: dict, path: Path = FORECASTS) -> l
         d.update(run)
         recs.append(d)
     out = append(path, "forecast", recs)
+    if out and parse_utc(out[0]["recorded_utc"]) < completed:
+        raise StoreError("recorded time precedes prediction completion")
+    return out
+
+
+def record_game_forecasts(fc: pd.DataFrame, run: dict, path: Path = GAME_FORECASTS) -> list[dict]:
+    """Append one record per game forecast (with its interval bounds and uncertainty metadata),
+    stamped with the actual write time, never before prediction completion."""
+    completed = parse_utc(run["prediction_completed_utc"])
+    if now_utc() < completed:
+        raise StoreError("prediction_completed_utc is in the future; refusing to record")
+    lv = [c for c in fc.columns if c.startswith(("margin_lo_", "margin_hi_", "total_lo_", "total_hi_"))]
+    recs = []
+    for r in fc.to_dict("records"):
+        d = {k: r.get(k) for k in GAME_FORECAST_FIELDS + lv}
+        d.update(run)
+        recs.append(d)
+    out = append(path, "game_forecast", recs)
     if out and parse_utc(out[0]["recorded_utc"]) < completed:
         raise StoreError("recorded time precedes prediction completion")
     return out

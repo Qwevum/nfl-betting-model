@@ -40,15 +40,18 @@ def drivers(g, coefs: dict) -> list[str]:
     return [f"{FEATURE_NAMES[k]}: {v:+.1f} pts to {g.home_team}" for k, v in top if abs(v) >= 0.1]
 
 
-def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model, settings) -> str:
+def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model, settings, fc=None) -> str:
+    """fc: this game's row of the GAME FORECASTS table (forecast.forecast_slate), if computed."""
     out = [f"## {g.away_team} @ {g.home_team}", ""]
+    if fc is not None:
+        out += ["**Forecast** (see GAME FORECASTS for what the intervals mean)", "", "- " + forecast_line(fc), ""]
     out += ["**Verified facts** (read from dated sources)", ""] + [f"- {f}" for f in ctx.facts]
     out += ["", "**Model estimate** (reproducible calculation, see README)", ""]
     out.append(f"- Market spread {_line(g.home_team, g.away_team, g.spread_line)}, total "
                f"{'n/a' if pd.isna(g.total_line) else f'{g.total_line:g}'} (consensus)")
     out.append(f"- Model's own line {_line(g.home_team, g.away_team, g.model_margin)}; fair line after "
                f"calibration {_line(g.home_team, g.away_team, g.fair_margin)}; fair total {g.fair_total:.1f}")
-    out.append("- " + headline_win_prob(g, rows))
+    out.append("- " + headline_win_prob(g, rows) + (forecast_vs_ml_note(fc, rows) if fc is not None else ""))
     d = drivers(g, coefs)
     if d:
         out.append("- Biggest inputs to the model's own line: " + "; ".join(d))
@@ -98,6 +101,18 @@ def status_label(r) -> str:
     return f"not a bet: {cat}" if isinstance(cat, str) and cat else "not a bet"
 
 
+def forecast_vs_ml_note(fc, rows: pd.DataFrame) -> str:
+    """Why the moneyline betting row's probability can differ from the game forecast."""
+    ml = rows[(rows["market"] == "ml") & (rows["side"] == "home")] if len(rows) else rows
+    if not len(ml) or pd.isna(fc["p_home"]):
+        return ""
+    p_ml = float(ml.iloc[0]["model_prob"])
+    p_fc = fc["p_home"] / (fc["p_home"] + fc["p_away"])     # same convention: excluding ties
+    return (f". The game forecast gives {p_fc:.1%} excluding ties ({p_ml - p_fc:+.1%} pts vs this row): the forecast is "
+            "anchored to the spread market with no book excluded; this row is anchored to the moneyline market, "
+            "built without the priced book, so the two markets' own disagreement shows up here")
+
+
 def headline_win_prob(g, rows: pd.DataFrame) -> str:
     """The SAME probability the moneyline rows use (final), with the raw market next to it."""
     ml = rows[(rows["market"] == "ml") & (rows["side"] == "home")] if len(rows) else rows
@@ -106,6 +121,153 @@ def headline_win_prob(g, rows: pd.DataFrame) -> str:
         return (f"{g.home_team} win probability {r['model_prob']:.1%} (final, as used in the moneyline rows; "
                 f"raw market {_pct(r['market_prob'])})")
     return f"{g.home_team} win probability: n/a (no moneyline priced)"
+
+
+# ---------------------------------------------------------------- forecasts (separate from betting)
+
+def _ci(lo, hi) -> str:
+    return "" if lo is None or pd.isna(lo) or pd.isna(hi) else f" ({lo:.1%}-{hi:.1%})"
+
+
+def _pi(lo, hi, signed: bool) -> str:
+    if pd.isna(lo) or pd.isna(hi):
+        return "n/a"
+    f = (lambda x: f"{x:+.0f}") if signed else (lambda x: f"{x:.0f}")
+    return f"{f(lo)} to {f(hi)}"
+
+
+def forecast_line(r) -> str:
+    """One-sentence forecast for a game (terminal / per-game section)."""
+    if pd.isna(r["p_home"]):
+        return f"No forecast: {r['margin_source']}"
+    tag = f"{round(r['level'] * 100):d}"
+    s = (f"{r['home_team']} {r['p_home']:.1%}{_ci(r.get('p_home_lo'), r.get('p_home_hi'))}, "
+         f"{r['away_team']} {r['p_away']:.1%}{_ci(r.get('p_away_lo'), r.get('p_away_hi'))}"
+         + (f", tie {r['p_tie']:.1%}" if r["p_tie"] > 0 else "")
+         + f"; margin {r['home_team']} {r['margin_mean']:+.1f} ({tag}% PI {_pi(r[f'margin_lo_{tag}'], r[f'margin_hi_{tag}'], True)})")
+    if pd.notna(r["total_mean"]):
+        s += f"; total {r['total_mean']:.1f} ({tag}% PI {_pi(r[f'total_lo_{tag}'], r[f'total_hi_{tag}'], False)})"
+    return s + f" [{r['margin_basis']}]"
+
+
+def forecasts_md(fc: pd.DataFrame, meta: dict, missing: dict | None = None) -> str:
+    """GAME FORECASTS: every game with sufficient data, independent of any betting decision.
+    meta: method, status, replicates, seed, level, scheme, train_hash, model_version, data timestamps."""
+    lv = meta["level"]
+    tag = f"{round(lv * 100):d}"
+    out = ["## GAME FORECASTS", "",
+           "Forecasts are made for every game, whether or not there is a bet. A team can be the predicted "
+           "winner while every bet on the game is NO BET: the forecast is about the game, a bet is about "
+           "the price.", "",
+           "How to read the numbers:", "",
+           f"- **Win probability (interval)**: the model's estimated probability, with a {lv:.0%} interval for "
+           "that ESTIMATE. The interval shows how much the estimate moves when the model is refit on "
+           "re-weighted history (" + meta["method"] + "). It is NOT a range of outcomes, and a "
+           f"{lv:.0%} interval is not a {lv:.0%} chance that anyone wins. It is conditional on the market "
+           "snapshot shown and on the team ratings as computed, and does not cover model or market "
+           "misspecification. It is narrow when the forecast stays close to the market; that does not mean "
+           "the game is predictable: the favorite still loses as often as its probability says.",
+           f"- **Projected margin / total (PI)**: the mean of the full predictive distribution (game-to-game "
+           f"variability and key numbers such as 3 and 7, mixed over the bootstrap replicates when computed). "
+           f"The {lv:.0%} prediction interval (PI) is the range that contains the actual final margin/total "
+           f"with about {lv:.0%} probability under that distribution; its historical coverage is reported in "
+           "`reports/forecast_validation_dev.md`. Margin = home minus away points.",
+           "- **Win probability source**: the margin distribution, anchored to the spread market when there "
+           "is one. Moneyline betting rows are anchored to the moneyline market instead, built without the "
+           "priced book and excluding ties, so they can differ by a point or two; each game section states the "
+           "difference.",
+           "- **Basis**: *market-informed* = book-independent market reference moved by the model's calibrated "
+           "edge; *team ratings only* = no market line was available (wider intervals); *market reference "
+           "only* = ratings were incomplete, so the model added nothing.", "",
+           f"Uncertainty: **{meta['status']}**; method `{meta['method_version']}`, scheme `{meta['scheme']}`, "
+           f"{meta['replicates']} replicates, seed {meta['seed']}, level {lv:.0%}"
+           + (f", training rows `{meta['train_hash']}`" if meta.get("train_hash") else "")
+           + (f", {meta['seconds']:.0f}s{' (cached)' if meta.get('cached') else ''}" if meta.get("seconds") is not None else "")
+           + f". Model version `{meta['model_version']}`. Data: {meta['data_time']}.", ""]
+    if fc.empty:
+        out.append("No games to forecast.")
+        return "\n".join(out) + "\n"
+    out += [f"| Game | Kickoff | Basis | Predicted winner | Home win (CI) | Away win (CI) | Tie | "
+            f"Margin, home - away ({tag}% PI) | Total ({tag}% PI) | Missing inputs |",
+            "|---|---|---|---|---|---|---|---|---|---|"]
+    for _, r in fc.iterrows():
+        game = f"{r['away_team']} @ {r['home_team']}"
+        kick = r["kickoff_utc"].strftime("%a %m/%d %H:%MZ") if pd.notna(r["kickoff_utc"]) else str(r["gameday"])[:10]
+        miss = len((missing or {}).get(r["game_id"], []))
+        if pd.isna(r["p_home"]):
+            out.append(f"| {game} | {kick} | unavailable | - | - | - | - | - | - | {r['margin_source']} |")
+            continue
+        tot = (f"{r['total_mean']:.1f} ({_pi(r[f'total_lo_{tag}'], r[f'total_hi_{tag}'], False)})"
+               if pd.notna(r["total_mean"]) else "n/a")
+        out.append(f"| {game} | {kick} | {r['margin_basis']}; {r['margin_source']} | **{r['winner']}** "
+                   f"{r['p_winner']:.1%} | {r['p_home']:.1%}{_ci(r['p_home_lo'], r['p_home_hi'])} | "
+                   f"{r['p_away']:.1%}{_ci(r['p_away_lo'], r['p_away_hi'])} | {r['p_tie']:.1%} | "
+                   f"{r['margin_mean']:+.1f} ({_pi(r[f'margin_lo_{tag}'], r[f'margin_hi_{tag}'], True)}) | {tot} | "
+                   f"{miss if miss else 'none'} |")
+    if missing:
+        lines = [f"- {fc.set_index('game_id').loc[g, 'away_team']} @ {fc.set_index('game_id').loc[g, 'home_team']}: "
+                 + "; ".join(m) for g, m in missing.items() if m and g in set(fc["game_id"])]
+        if lines:
+            out += ["", "Missing inputs (the forecast does not use them; the betting rules may):", ""] + lines
+    return "\n".join(out) + "\n"
+
+
+def terminal_forecasts(fc: pd.DataFrame, meta: dict) -> str:
+    if fc.empty:
+        return "GAME FORECASTS: no games."
+    lv = meta["level"]
+    tag = f"{round(lv * 100):d}"
+    t_ = []
+    for _, r in fc.iterrows():
+        if pd.isna(r["p_home"]):
+            t_.append([f"{r['away_team']} @ {r['home_team']}", "-", "-", "-", "-", "-", "unavailable"])
+            continue
+        t_.append([f"{r['away_team']} @ {r['home_team']}", f"{r['winner']} {r['p_winner']:.1%}",
+                   f"{r['p_home']:.1%}{_ci(r['p_home_lo'], r['p_home_hi'])}",
+                   f"{r['margin_mean']:+.1f} ({_pi(r[f'margin_lo_{tag}'], r[f'margin_hi_{tag}'], True)})",
+                   f"{r['total_mean']:.1f} ({_pi(r[f'total_lo_{tag}'], r[f'total_hi_{tag}'], False)})"
+                   if pd.notna(r["total_mean"]) else "n/a",
+                   f"{r['p_tie']:.1%}", r["margin_basis"]])
+    head = ["Game", "Predicted winner", f"Home win ({lv:.0%} CI of estimate)", f"Margin h-a ({tag}% PI)",
+            f"Total ({tag}% PI)", "Tie", "Basis"]
+    return (f"GAME FORECASTS - uncertainty: {meta['status']} ({meta['replicates']} replicates, conditional on the "
+            f"market snapshot). CI = uncertainty of the ESTIMATED probability, not a chance of winning;\n"
+            f"PI = range of the actual result under the predictive distribution.\n"
+            + table(t_, head, "llrrrrl"))
+
+
+# ---------------------------------------------------------------- betting opportunities
+
+def betting_md(rows: pd.DataFrame, preds: pd.DataFrame, settings) -> str:
+    """BETTING OPPORTUNITIES: the best side of every priced market, with EV and its range."""
+    lv = settings.uncertainty_level
+    out = ["## BETTING OPPORTUNITIES", "",
+           "EV is the price-based assessment: expected profit per unit staked at the offered price, from the "
+           "estimated win, push and loss probabilities. The EV range is the "
+           f"{lv:.0%} interval of EV across bootstrap replicates at the SAME fixed price, line and market "
+           "reference (each replicate's own win/push probabilities; conditional on that market snapshot). "
+           "Decisions use the existing rules"
+           + (" plus the EXPERIMENTAL lower-bound rule (EV range must be above 0)"
+              if settings.experimental_ev_lower_bound_rule else "; the EV range does not change them") + ". "
+           "Moneyline probabilities are conditional on the game not ending tied (a tie refunds the bet). "
+           "Each side is priced against a market reference WITHOUT its own book, so its probability can "
+           "differ slightly from the game forecast.", ""]
+    if rows.empty:
+        out.append("No priced markets.")
+        return "\n".join(out) + "\n"
+    names = preds.set_index("game_id")
+    best = rows[rows["is_best_side"].astype(bool)] if "is_best_side" in rows else rows
+    out += ["| Game | Market | Bet | Book | Odds | P(win) | P(push) | P(lose) | EV | EV range | Status | Reasons |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for _, r in best.sort_values(["decision", "ev"], ascending=[True, False]).iterrows():
+        x = names.loc[r["game_id"]]
+        rng = (f"{r['ev_lo']:+.1%} to {r['ev_hi']:+.1%}" if pd.notna(r.get("ev_lo")) else
+               str(r.get("unc_status", "not computed")))
+        out.append(f"| {x.away_team} @ {x.home_team} | {MARKET[r['market']]} | {_bet(r)} | {r['book']} | "
+                   f"{int(r['price']):+d} | {_pct(r['p_win'])} | {_pct(r['p_push'])} | {_pct(r['p_lose'])} | "
+                   f"{r['ev']:+.1%} | {rng} | {status_label(r)} | "
+                   f"{(r['reasons'] or 'all checks passed').replace(' | ', '; ').replace('|', '/')} |")
+    return "\n".join(out) + "\n"
 
 
 def actionable_md(rows: pd.DataFrame, settings) -> str:

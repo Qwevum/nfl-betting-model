@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """NFL spread / moneyline / total model.
 
-  python run.py predict [--week N] [--season YYYY]   full report for the upcoming week + log
+  python run.py predict [--week N] [--season YYYY]   game forecasts + betting opportunities + log
+  python run.py forecast [--week N] [--season YYYY]  game forecasts only (no odds requests; free)
   python run.py recommend [--date YYYY-MM-DD]        decision table for a game day (live or historical)
   python run.py validate [--from 2015]               out-of-sample validation vs baselines and market
   python run.py ratings                              current team power ratings
@@ -72,7 +73,7 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
     art = {"offers_raw": pd.DataFrame(), "offers_rejected": pd.DataFrame(), "offers_valid": pd.DataFrame(),
            "consensus": pd.DataFrame(), "references": pd.DataFrame(), "injury_season": None,
            "inputs_rejected": pd.DataFrame(columns=inputs.REJECT_COLS), "weather_accepted": pd.DataFrame(),
-           "qb_accepted": pd.DataFrame()}
+           "qb_accepted": pd.DataFrame(), "train": train, "refs_by_game": None}
 
     overrides, weather = {}, {}
     if live:
@@ -157,7 +158,7 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
         notes.append("quotes kept expiring during re-pricing; executable bets relying on any stale quote were "
                      "downgraded to conditional")
     art.update(references=priced.references, references_at_collection=first.get("references"),
-               offers_valid_final=priced.valid, reprice=info)
+               offers_valid_final=priced.valid, reprice=info, refs_by_game=priced.refs_by_game)
     rows = priced.rows
     if len(rows):
         n_late = int(rows["post_kickoff"].sum())
@@ -167,9 +168,67 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
     return model, coefs, priced.preds, rows, priced.contexts, notes, art
 
 
+# ---------------------------------------------------------------- forecasts and uncertainty
+
+def compute_uncertainty(train: pd.DataFrame, settings, mode: str) -> tuple[list, dict]:
+    """Bootstrap replicates for `train` (fast: uncertainty_replicates, deep: uncertainty_deep_replicates).
+    Never raises: a failure is reported in meta['status'] and no bounds are produced."""
+    import time
+    from nflmodel import uncertainty as unc
+    n = {"off": 0, "fast": settings.uncertainty_replicates, "deep": settings.uncertainty_deep_replicates}[mode]
+    meta = {"method": unc.METHOD, "method_version": unc.METHOD_VERSION, "scheme": settings.uncertainty_scheme,
+            "seed": settings.uncertainty_seed, "level": settings.uncertainty_level, "replicates": 0,
+            "train_hash": unc.train_hash(train), "seconds": None, "cached": False, "mode": mode}
+    if n == 0:
+        meta["status"] = ("off (--uncertainty off)" if mode == "off" else "off (uncertainty_replicates = 0)")
+        return [], meta
+    workers = settings.uncertainty_workers or unc.default_workers()
+    try:
+        meta["cached"] = unc.is_cached(train, n, settings.uncertainty_seed, settings.uncertainty_scheme)
+        if not meta["cached"]:
+            print(f"Fitting {n} bootstrap replicates ({mode}; {workers} worker(s)) ...", flush=True)
+        t0 = time.time()
+        reps = unc.fit_replicates(train, n, settings.uncertainty_seed, settings.uncertainty_scheme, workers=workers)
+        meta.update(seconds=time.time() - t0, replicates=len(reps), status=f"ok ({mode})")
+        return reps, meta
+    except Exception as e:   # shown explicitly; never replaced by invented bounds
+        meta["status"] = f"FAILED ({type(e).__name__}: {str(e)[:120]}); no uncertainty bounds shown"
+        return [], meta
+
+
+def _data_time(timeline: dict | None) -> str:
+    """Retrieval times of the inputs, for the forecast section."""
+    src = dict(SOURCES)
+    if not src and (ROOT / "data" / "sources.json").exists():
+        import json
+        try:
+            src = json.loads((ROOT / "data" / "sources.json").read_text())
+        except Exception:
+            src = {}
+    parts = []
+    s = src.get("schedule_scores_lines", {})
+    parts.append(f"schedule and consensus lines retrieved {s.get('retrieved_utc', 'unknown')}")
+    if timeline and timeline.get("odds_collected_utc"):
+        parts.append(f"bookmaker odds collected {timeline['odds_collected_utc']}")
+    if timeline and timeline.get("prediction_completed_utc"):
+        parts.append(f"prediction completed {timeline['prediction_completed_utc']}")
+    return "; ".join(parts) + " (UTC)"
+
+
+def _unc_fields(meta: dict) -> dict:
+    return {"unc_method": meta["method_version"], "unc_scheme": meta["scheme"], "unc_seed": meta["seed"],
+            "unc_train_hash": meta["train_hash"]}
+
+
+def _all_book_refs(refs_by_game: dict | None) -> dict | None:
+    if not refs_by_game:
+        return None
+    return {gid: {mk: refs.get((mk, None)) for mk in ("spread", "ml", "total")} for gid, refs in refs_by_game.items()}
+
+
 # ---------------------------------------------------------------- recording
 
-def record(rows, preds, art, settings, clock, args, games) -> None:
+def record(rows, preds, art, settings, clock, args, games, fc=None, umeta=None) -> None:
     """Snapshot the exact inputs and append every priced side to the forecast history.
 
     Simulated-time runs (--now) and runs from uncommitted code are never recorded.
@@ -201,7 +260,8 @@ def record(rows, preds, art, settings, clock, args, games) -> None:
                 "references_at_collection.csv": art.get("references_at_collection"),
                 "offers_valid_final.csv": art.get("offers_valid_final"),
                 "inputs_rejected.csv": art["inputs_rejected"], "qb_accepted.csv": art["qb_accepted"],
-                "weather_accepted.csv": art["weather_accepted"], "predictions.csv": preds},
+                "weather_accepted.csv": art["weather_accepted"], "predictions.csv": preds,
+                "game_forecasts.csv": fc},
         meta={"model_version": version, "settings": vars(settings), "reprice": art.get("reprice"), **timeline})
     kick = dict(zip(preds["game_id"], preds["kickoff_utc"].map(fmt)))
     recs = store.record_forecasts(
@@ -212,6 +272,13 @@ def record(rows, preds, art, settings, clock, args, games) -> None:
                     home_team=rows["game_id"].map(dict(zip(preds["game_id"], preds["home_team"])))),
         {"run_id": run_id, "model_version": version, "snapshot_id": sid,
          "horizon_minutes": settings.horizon_minutes, **timeline})
+    if fc is not None and len(fc):
+        fc = fc[fc["game_id"].isin(rows["game_id"])]
+        g = store.record_game_forecasts(fc.assign(kickoff_utc=fc["kickoff_utc"].map(fmt)), {
+            "run_id": run_id, "command": "predict", "model_version": version, "snapshot_id": sid,
+            "market_input": "live bookmaker references when available, else nflverse consensus",
+            **{k: umeta[k] for k in ("method_version", "scheme", "seed", "train_hash", "status")}, **timeline})
+        print(f"Recorded {len(g)} game forecasts to {store.GAME_FORECASTS.relative_to(ROOT)}")
     if len(art.get("weather_accepted", [])):
         n = store.archive_weather({w["game_id"]: w for w in art["weather_accepted"].to_dict("records")}, run_id)
         print(f"Archived {n} new weather forecast(s) to {store.WEATHER_ARCHIVE.relative_to(ROOT)}")
@@ -246,9 +313,19 @@ def cmd_predict(args):
         games, feat, qbr, wk, cutoff, live, settings, refresh=not args.no_refresh, clock=clock)
     for n in notes:
         print(f"  ! {n}")
+    from nflmodel import betrange, forecast
+    reps, umeta = compute_uncertainty(art["train"], settings, args.uncertainty)
+    level = settings.uncertainty_level
+    fc = forecast.forecast_slate(model, preds, _all_book_refs(art.get("refs_by_game")), settings, reps, level)
+    umeta.update(model_version=track.model_version(), data_time=_data_time(art.get("timeline")))
+    print()
+    print(report.terminal_forecasts(fc, umeta))
+    print()
     if rows.empty:
-        raise SystemExit("No odds available for these games yet.")
+        raise SystemExit("No odds available for these games yet: forecasts above; no betting assessment.")
     save_sources()
+    rows = betrange.ev_uncertainty(rows, preds, reps, art.get("refs_by_game"), settings, level)
+    rows = betrange.apply_lower_bound_rule(rows, settings).assign(**_unc_fields(umeta))
 
     from nflmodel import diagnose
     rows["category"] = diagnose.categorize(rows, settings)
@@ -269,11 +346,15 @@ def cmd_predict(args):
     val = ROOT / "reports" / "validation_summary.md"
     md = report.header(season, week, SOURCES, track.model_version(), model, settings,
                        val.read_text() if val.exists() else None, art.get("timeline", {}), clock.simulated)
+    missing = {gid: list(c.missing) for gid, c in contexts.items()}
+    md += "\n" + report.forecasts_md(fc, umeta, missing)
+    md += "\n" + report.betting_md(rows, preds, settings)
     md += "\n" + report.actionable_md(rows, settings) + "\n" + report.watchlist_md(watch, settings, preds)
     md += "\n" + report.diagnostics_md(rows, settings)
+    fcx = fc.set_index("game_id")
     for g in preds.itertuples(index=False):
         md += "\n" + report.game_section(g, contexts[g.game_id], rows[rows["game_id"] == g.game_id], coefs, model,
-                                         settings)
+                                         settings, fcx.loc[g.game_id] if g.game_id in fcx.index else None)
     out = ROOT / "reports" / ("dev" if args.now or track.model_version().endswith("-modified") else "") \
         / f"{season}_week{week:02d}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -287,7 +368,98 @@ def cmd_predict(args):
                           f" (UTC): {n_bet} actionable of {len(best)} markets.\n")
         print(f"Latest-report link: {latest.relative_to(ROOT)}")
     if live:
-        record(rows, preds, art, settings, clock, args, games)
+        record(rows, preds, art, settings, clock, args, games, fc, umeta)
+
+
+def cmd_forecast(args):
+    """GAME FORECASTS only. Uses the nflverse consensus lines in the schedule (no bookmaker requests,
+    no API credits). Live weeks are recorded to logs/game_forecasts.jsonl from committed code."""
+    from nflmodel import forecast
+    clock = runtime.Clock(parse_utc(args.now) if args.now else None)
+    clock.stamp("run_started")
+    games, feat, _, current, qbr = build(refresh=not args.no_refresh)
+    season = args.season or current
+    upcoming = feat[(feat["season"] == season) & feat["result"].isna()]
+    if args.week is None and upcoming.empty:
+        raise SystemExit(f"No upcoming games in {season}; pass --week for a past week.")
+    week = args.week or int(upcoming["week"].min())
+    day = feat[(feat["season"] == season) & (feat["week"] == week)]
+    if day.empty:
+        raise SystemExit(f"No games found for {season} week {week}")
+    live = day["result"].isna().any()
+    settings = load_settings()
+    cutoff = day["gameday"].min()
+    train = feat[feat["result"].notna() & (feat["gameday"] < cutoff) & (feat["season"] > FIRST_PBP_SEASON)]
+    model = fit(train)
+    notes, missing, inputs_note = [], {}, None
+    if live:
+        now = clock.stamp("inputs_read")
+        started = day[day["kickoff_utc"].isna() | (day["kickoff_utc"] <= now)]
+        for g in started.itertuples(index=False):
+            notes.append(f"{g.game_id} skipped: kickoff is not after {fmt(now)}")
+        day = day.drop(started.index)
+        overrides, rej = inputs.load_qb_overrides(day, settings, now)
+        for x in rej.itertuples(index=False):
+            notes.append(f"{x.file} row rejected ({x.game_id}): {x.reason}")
+        day = inputs.apply_qb_overrides(day, overrides, games, qbr)
+        inj = load_injuries(season, refresh=not args.no_refresh)
+        preds0 = model.predict(day)
+        for g in preds0.itertuples(index=False):
+            ctx = decide.build_context(g, inj, SOURCES, model.pure.raw_coefs(), model.k_spread, overrides, {}, settings)
+            missing[g.game_id] = [m for m in ctx.missing if not m.startswith("Weather forecast")]
+        inputs_note = "QB overrides applied where valid; injury reports listed as missing inputs only"
+    for n in notes:
+        print(f"  ! {n}")
+    reps, umeta = compute_uncertainty(train, settings, args.uncertainty)
+    fc = forecast.forecast_slate(model, day, None, settings, reps, settings.uncertainty_level)
+    clock.stamp("prediction_completed")
+    timeline = clock.as_dict()
+    version = track.model_version()
+    umeta.update(model_version=version, data_time=_data_time(timeline))
+    print(f"\n=== {season} Week {week} forecasts ===  model {version}  |  market input: nflverse consensus lines "
+          "(untimed); no bookmaker requests\n")
+    print(report.terminal_forecasts(fc, umeta))
+    md = [f"# NFL {season} Week {week} - game forecasts", ""]
+    if clock.simulated:
+        md += ["> **SIMULATED RUN** (`--now`): nothing is recorded.", ""]
+    md += [f"Market input: nflverse consensus lines (untimed); no bookmaker quotes were requested. "
+           f"{inputs_note or 'Historical week: outcomes are shown for checking only; nothing is recorded.'}", "",
+           report.forecasts_md(fc, umeta, missing)]
+    if not live:
+        lv = f"{round(settings.uncertainty_level * 100):d}"
+        res = day.set_index("game_id")
+        md += ["## Results (historical week: known after the fact, not used by the forecast)", "",
+               f"| Game | Final (home - away) | Margin in {lv}% PI | Total | Total in {lv}% PI | Predicted winner won |",
+               "|---|---|---|---|---|---|"]
+        for _, r in fc.iterrows():
+            x = res.loc[r["game_id"]]
+            if pd.isna(x["result"]) or pd.isna(r["p_home"]):
+                continue
+            m_in = r[f"margin_lo_{lv}"] <= x["result"] <= r[f"margin_hi_{lv}"]
+            t_in = (r[f"total_lo_{lv}"] <= x["total"] <= r[f"total_hi_{lv}"]) if pd.notna(r["total_mean"]) else None
+            won = "tie" if x["result"] == 0 else ("yes" if (x["result"] > 0) == (r["winner"] == r["home_team"]) else "no")
+            md.append(f"| {r['away_team']} @ {r['home_team']} | {x['result']:+.0f} | {'yes' if m_in else 'no'} | "
+                      f"{x['total']:.0f} | {'n/a' if t_in is None else ('yes' if t_in else 'no')} | {won} |")
+        md.append("")
+    out = ROOT / "reports" / ("dev" if args.now or version.endswith("-modified") else "") \
+        / f"{season}_week{week:02d}_forecast.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(md) + "\n", encoding="utf-8")
+    print(f"Report: {out.relative_to(ROOT)}")
+    if live and not (clock.simulated or args.now or version.endswith("-modified") or version == "unknown"):
+        run_id = timeline["prediction_completed_utc"].replace(":", "").replace("-", "") + "_" + version + "_fc"
+        sid, d = store.save_snapshot(run_id, files={"sources.json": ROOT / "data" / "sources.json",
+                                                    "qb_overrides.csv": ROOT / "qb_overrides.csv"},
+                                     frames={"schedule_rows.csv": day, "game_forecasts.csv": fc},
+                                     meta={"model_version": version, "settings": vars(settings), **timeline})
+        g = store.record_game_forecasts(fc.assign(kickoff_utc=fc["kickoff_utc"].map(fmt)), {
+            "run_id": run_id, "command": "forecast", "model_version": version, "snapshot_id": sid,
+            "market_input": "nflverse consensus (untimed)",
+            **{k: umeta[k] for k in ("method_version", "scheme", "seed", "train_hash", "status")}, **timeline})
+        print(f"Recorded {len(g)} game forecasts to {store.GAME_FORECASTS.relative_to(ROOT)}; inputs in "
+              f"{d.relative_to(ROOT)}")
+    elif live:
+        print("Not recorded: simulated time (--now) or uncommitted model code.")
 
 
 def cmd_recommend(args):
@@ -315,14 +487,19 @@ def cmd_recommend(args):
         raise SystemExit("No odds available for these games yet.")
     from nflmodel import diagnose
     rows["category"] = diagnose.categorize(rows, settings)
+    from nflmodel import betrange
+    reps, umeta = compute_uncertainty(art["train"], settings, args.uncertainty)
+    rows = betrange.ev_uncertainty(rows, preds, reps, art.get("refs_by_game"), settings, settings.uncertainty_level)
+    rows = betrange.apply_lower_bound_rule(rows, settings).assign(**_unc_fields(umeta))
+    rows["category"] = diagnose.categorize(rows, settings)
     markets = set(args.markets.split(","))
     rows = rows[rows["market"].isin(markets)]
     show = rows if args.all else rows[rows["is_best_side"]]
 
     g = preds.set_index("game_id")
     head = ["Date", "Game", "Market", "Bet", "Book", "Odds", "Implied", "Raw mkt", "Final", "EV",
-            "EV -0.5pt", "Kelly", "Stake", "Status"]
-    align = "llllllrrrrrrrl"
+            f"EV {settings.uncertainty_level:.0%} range", "EV -0.5pt", "Kelly", "Stake", "Status"]
+    align = "llllllrrrrrrrrl"
     graded = not live
     if graded:
         head += ["Result", "Units"]; align += "lr"
@@ -332,7 +509,9 @@ def cmd_recommend(args):
         line = [pd.Timestamp(x.gameday).strftime("%a %m/%d"), f"{x.away_team} @ {x.home_team}",
                 report.MARKET[r["market"]], report._bet(r), str(r["book"]), f"{int(r['price']):+d}",
                 report._pct(r["implied"]), report._pct(r["market_prob"]), report._pct(r["model_prob"]),
-                f"{r['ev']:+.1%}", f"{r['ev[fair 0.5 worse]']:+.1%}", f"{r['kelly']:.1%}",
+                f"{r['ev']:+.1%}",
+                f"{r['ev_lo']:+.1%}..{r['ev_hi']:+.1%}" if pd.notna(r["ev_lo"]) else "n/a",
+                f"{r['ev[fair 0.5 worse]']:+.1%}", f"{r['kelly']:.1%}",
                 # historical replay grades every non-NO-BET side (closing consensus, see validate.py)
                 f"{r['stake_units']:.2f}u" if r["decision"] == "BET" or (graded and r["decision"] != "NO BET")
                 else "-", report.status_label(r)]
@@ -360,6 +539,7 @@ def cmd_recommend(args):
     path.parent.mkdir(exist_ok=True)
     show.to_csv(path, index=False)
     print(f"Saved {path.relative_to(ROOT)}")
+    print(f"EV range: {umeta['status']}, {umeta['replicates']} replicates, conditional on the market snapshot.")
     if live:
         record(rows, preds, art, settings, clock, args, games)
 
@@ -753,7 +933,8 @@ def cmd_void(args):
 def cmd_verify_log(args):
     bad = False
     from nflmodel import experiment
-    for path in (store.FORECASTS, store.LEDGER, store.COLLECTIONS, experiment.LOG, store.WEATHER_ARCHIVE):
+    for path in (store.FORECASTS, store.GAME_FORECASTS, store.LEDGER, store.COLLECTIONS, experiment.LOG,
+                 store.WEATHER_ARCHIVE):
         ok, msg = store.verify(path)
         bad |= not ok
         print(f"{path.relative_to(ROOT)}: {'OK' if ok else 'FAILED'} - {msg}")
@@ -762,9 +943,18 @@ def cmd_verify_log(args):
 
 
 def main():
+    import sys
+    for s in (sys.stdout, sys.stderr):   # tables use box-drawing characters; Windows pipes default to cp1252
+        if (getattr(s, "encoding", "") or "").lower().replace("-", "") != "utf8":
+            try:
+                s.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("predict"); p.add_argument("--week", type=int); p.add_argument("--season", type=int)
+    fo = sub.add_parser("forecast", help="game forecasts only (nflverse consensus lines; no odds requests)")
+    fo.add_argument("--week", type=int); fo.add_argument("--season", type=int)
     r = sub.add_parser("recommend", help="decision table for a game day, live or historical")
     r.add_argument("--date", help="YYYY-MM-DD (default: next game day)")
     r.add_argument("--days", type=int, default=1, help="number of days from --date (default 1)")
@@ -810,6 +1000,10 @@ def main():
     vf.add_argument("--workers", type=int, default=0, help="parallel processes (default: automatic)")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
     t.add_argument("--week", type=int); t.add_argument("--season", type=int)
+    for s in (p, fo, r):
+        s.add_argument("--uncertainty", choices=["fast", "deep", "off"], default="fast",
+                       help="bootstrap uncertainty: fast (uncertainty_replicates, cached), deep "
+                            "(uncertainty_deep_replicates), off")
     for s in sub.choices.values():
         s.add_argument("--no-refresh", action="store_true", help="use cached data, no downloads")
         s.add_argument("--min-edge", type=float, default=None,
@@ -818,7 +1012,7 @@ def main():
                        help="reject bookmaker quotes older than this many minutes; default from settings")
         s.add_argument("--now", help="evaluate as of this UTC time (ISO-8601 with Z), for reproducible runs")
     args = ap.parse_args()
-    {"predict": cmd_predict, "recommend": cmd_recommend, "validate": cmd_validate,
+    {"predict": cmd_predict, "forecast": cmd_forecast, "recommend": cmd_recommend, "validate": cmd_validate,
      "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates,
      "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log,
      "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live,

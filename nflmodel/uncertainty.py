@@ -102,6 +102,12 @@ def cache_key(train: pd.DataFrame, n: int, seed: int, scheme: str, fit_kwargs: d
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:24]
 
 
+def is_cached(train: pd.DataFrame, n: int, seed: int, scheme: str, fit_kwargs: dict | None = None,
+              start: int = 0) -> bool:
+    key = cache_key(train, n, seed, scheme, {**dict(fit_kwargs or {}), "start": start})
+    return (CACHE_DIR / f"{key}.pkl").exists()
+
+
 _W: dict = {}
 
 
@@ -202,5 +208,5 @@ def pmf_interval(pmf: np.ndarray, support: np.ndarray, level: float) -> tuple[fl
 
 
 __all__ = ["METHOD", "METHOD_VERSION", "SCHEMES", "replicate_weights", "fit_replicates", "train_hash",
-           "cache_key", "prob_interval", "linear_interval", "pmf_interval", "z_for", "default_workers",
+           "cache_key", "is_cached", "prob_interval", "linear_interval", "pmf_interval", "z_for", "default_workers",
            "code_fingerprint"]
