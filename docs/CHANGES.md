@@ -544,3 +544,56 @@ the model's own-line error but don't improve the market-anchored probabilities.
   verifies
 
 The suite passes: 81 tests.
+
+## 11. Run timestamps: stage clock, recheck at completion, true recorded time
+
+**Audit:**
+* `predict` captured one `now` at the start. That was before the model fit
+  (about a minute), the injury download and the odds fetch.
+* Quote freshness, "not in the future" and kickoff checks all used that start
+  time, so quotes fetched mid-run could be rejected as future-dated.
+* `record()` stamped every forecast with the start time, so a run that started
+  at kickoff − 61 min and finished at kickoff − 55 min looked like a
+  pre-horizon forecast.
+* `collect` had the same issue.
+
+**Files:**
+* new: `nflmodel/runtime.py`, `tests/test_runtime.py`
+* changed: `run.py`, `nflmodel/store.py`, `nflmodel/report.py`
+
+**Change:**
+* `Clock` stamps each stage when it actually happens:
+  * `run_started`
+  * `inputs_read` (the decision time for QB and weather rows)
+  * `injuries_retrieved`
+  * `odds_collected` (quotes are validated against this)
+  * `prediction_completed`
+
+  Every forecast record, snapshot meta and collection record carries these.
+* `recheck_before_issue()` runs at prediction completion:
+  * a BET whose quote has aged past `max_odds_age_minutes` is downgraded to
+    "BET IF PRICE AVAILABLE"
+  * a game whose kickoff has passed becomes NO BET and is **not recorded**
+* `store.record_forecasts()` stamps `recorded_utc` with the actual write time.
+  It raises if that would precede `prediction_completed_utc`, or if the
+  completion time is in the future.
+* Simulated runs use a fixed clock, are labelled "SIMULATED RUN" in the report,
+  go to `reports/dev/`, and are never recorded.
+
+**Verification:**
+* 9 new tests:
+  * the completion recheck: fresh → stays BET, stale-by-completion →
+    downgraded, kickoff passed → NO BET, flagged and zero stake
+  * conditional rows are left alone
+  * the simulated clock is fixed; the real clock stamps in order
+  * a quote timed after run start is valid against its collection time but
+    would have been wrongly rejected against run start
+  * the recorded time is the write time, not the run start
+  * a future completion time is refused
+
+  The suite passes: 90 tests.
+* A simulated replay shows the banner and timeline.
+
+**Historical records:** the 90 legacy forecasts keep their original
+run-start stamps (unchanged, flagged `legacy`). They predate this fix, and all
+fall days before kickoff.

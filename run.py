@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from nflmodel import decide, inputs, market, report, store, track, validate
+from nflmodel import decide, inputs, market, report, runtime, store, track, validate
 from nflmodel.config import load_settings
 from nflmodel.timeutil import fmt, kickoff_utc, now_utc, parse_utc
 from nflmodel.backtest import grade as grade_bet, profit
@@ -57,7 +57,7 @@ def _kick(gameday, gametime):
 # ---------------------------------------------------------------- core analysis
 
 def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: bool, settings,
-            refresh: bool, now: pd.Timestamp):
+            refresh: bool, clock):
     """Fit on games before `cutoff`, price `day`, and build decisions with context.
 
     Live: bookmaker offers are validated (timestamp, freshness, pre-kickoff) before
@@ -74,6 +74,7 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
 
     overrides, weather = {}, {}
     if live:
+        now = clock.stamp("inputs_read")   # decision time for user inputs
         started = day[day["kickoff_utc"].isna() | (day["kickoff_utc"] <= now)]
         for g in started.itertuples(index=False):
             notes.append(f"{g.game_id} skipped: kickoff {'unknown' if pd.isna(g.kickoff_utc) else fmt(g.kickoff_utc)} "
@@ -97,11 +98,13 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
     refs_by_game: dict = {}
     if live:
         inj = load_injuries(int(day["season"].iloc[0]), refresh=refresh)
+        clock.stamp("injuries_retrieved")
         print("Gathering odds ...")
         books, consensus, n3 = gather_offers(day, inputs.kickoff_map(day), settings)
+        collected = clock.stamp("odds_collected")   # quotes are validated against the time they were fetched
         notes += n3
         # 1) validate quotes, 2) build the market reference from valid quotes, 3) predict
-        valid, rejected = validate_offers(books, inputs.kickoff_map(day), now, settings)
+        valid, rejected = validate_offers(books, inputs.kickoff_map(day), collected, settings)
         art.update(offers_raw=books, offers_rejected=rejected, offers_valid=valid, consensus=consensus,
                    injury_season=int(day["season"].iloc[0]))
         if len(rejected):
@@ -149,22 +152,36 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
         best = decide.best_per_market(rows)
         rows["is_best_side"] = rows.set_index(["game_id", "market", "side"]).index.isin(
             best.set_index(["game_id", "market", "side"]).index)
+    completed = clock.stamp("prediction_completed")
+    if live and len(rows):
+        # recheck quote freshness and kickoff at completion, before anything is issued
+        rows = runtime.recheck_before_issue(rows, inputs.kickoff_map(day), completed, settings)
+        n_late = int(rows["post_kickoff"].sum())
+        if n_late:
+            notes.append(f"{n_late} side(s) dropped: kickoff passed before the run completed")
+    art["timeline"] = clock.as_dict()
     return model, coefs, preds, rows, contexts, notes, art
 
 
 # ---------------------------------------------------------------- recording
 
-def record(rows, preds, art, settings, now, args, games) -> None:
+def record(rows, preds, art, settings, clock, args, games) -> None:
     """Snapshot the exact inputs and append every priced side to the forecast history.
 
-    Simulated-time runs (--now) and runs from uncommitted code are never recorded."""
+    Simulated-time runs (--now) and runs from uncommitted code are never recorded.
+    Forecasts carry every stage timestamp; their recorded time is the actual write
+    time, never earlier than prediction completion. Sides whose game kicked off
+    before the run completed are not recorded."""
     version = track.model_version()
-    if args.now or version.endswith("-modified") or version == "unknown":
+    if clock.simulated or args.now or version.endswith("-modified") or version == "unknown":
         print("Not recorded: simulated time (--now) or uncommitted model code.")
         return
+    if "post_kickoff" in rows:
+        rows = rows[~rows["post_kickoff"].astype(bool)]
     if rows.empty:
         return
-    run_utc = fmt(now)
+    timeline = art["timeline"]
+    run_utc = timeline["prediction_completed_utc"]
     run_id = run_utc.replace(":", "").replace("-", "") + "_" + version
     slate = games[games["game_id"].isin(rows["game_id"])]
     inj = art.get("injury_season")
@@ -179,7 +196,7 @@ def record(rows, preds, art, settings, now, args, games) -> None:
                 "consensus.csv": art["consensus"], "references.csv": art["references"],
                 "inputs_rejected.csv": art["inputs_rejected"], "qb_accepted.csv": art["qb_accepted"],
                 "weather_accepted.csv": art["weather_accepted"], "predictions.csv": preds},
-        meta={"run_utc": run_utc, "model_version": version, "settings": vars(settings)})
+        meta={"model_version": version, "settings": vars(settings), **timeline})
     kick = dict(zip(preds["game_id"], preds["kickoff_utc"].map(fmt)))
     recs = store.record_forecasts(
         rows.assign(kickoff_utc=rows["game_id"].map(kick),
@@ -187,8 +204,8 @@ def record(rows, preds, art, settings, now, args, games) -> None:
                     week=rows["game_id"].map(dict(zip(preds["game_id"], preds["week"]))),
                     away_team=rows["game_id"].map(dict(zip(preds["game_id"], preds["away_team"]))),
                     home_team=rows["game_id"].map(dict(zip(preds["game_id"], preds["home_team"])))),
-        {"run_utc": run_utc, "run_id": run_id, "model_version": version, "snapshot_id": sid,
-         "horizon_minutes": settings.horizon_minutes})
+        {"run_id": run_id, "model_version": version, "snapshot_id": sid,
+         "horizon_minutes": settings.horizon_minutes, **timeline})
     if len(art.get("weather_accepted", [])):
         n = store.archive_weather({w["game_id"]: w for w in art["weather_accepted"].to_dict("records")}, run_id)
         print(f"Archived {n} new weather forecast(s) to {store.WEATHER_ARCHIVE.relative_to(ROOT)}")
@@ -207,6 +224,8 @@ def record(rows, preds, art, settings, now, args, games) -> None:
 # ---------------------------------------------------------------- commands
 
 def cmd_predict(args):
+    clock = runtime.Clock(parse_utc(args.now) if args.now else None)
+    clock.stamp("run_started")
     games, feat, _, current, qbr = build(refresh=not args.no_refresh)
     season = args.season or current
     upcoming = feat[(feat["season"] == season) & feat["result"].isna()]
@@ -217,9 +236,8 @@ def cmd_predict(args):
     live = wk["result"].isna().any()
     cutoff = wk["gameday"].min()
     settings = load_settings(min_edge=args.min_edge, max_odds_age_minutes=args.max_odds_age)
-    now = parse_utc(args.now) if args.now else now_utc()
     model, coefs, preds, rows, contexts, notes, art = analyze(
-        games, feat, qbr, wk, cutoff, live, settings, refresh=not args.no_refresh, now=now)
+        games, feat, qbr, wk, cutoff, live, settings, refresh=not args.no_refresh, clock=clock)
     for n in notes:
         print(f"  ! {n}")
     if rows.empty:
@@ -236,7 +254,7 @@ def cmd_predict(args):
 
     val = ROOT / "reports" / "validation_summary.md"
     md = report.header(season, week, SOURCES, track.model_version(), model, settings,
-                       val.read_text() if val.exists() else None)
+                       val.read_text() if val.exists() else None, art.get("timeline", {}), clock.simulated)
     for g in preds.itertuples(index=False):
         md += "\n" + report.game_section(g, contexts[g.game_id], rows[rows["game_id"] == g.game_id], coefs, model,
                                          settings)
@@ -247,10 +265,12 @@ def cmd_predict(args):
     out.write_text(md)
     print(f"Report: {out.relative_to(ROOT)}")
     if live:
-        record(rows, preds, art, settings, now, args, games)
+        record(rows, preds, art, settings, clock, args, games)
 
 
 def cmd_recommend(args):
+    clock = runtime.Clock(parse_utc(args.now) if args.now else None)
+    clock.stamp("run_started")
     games, feat, _, _, qbr = build(refresh=not args.no_refresh)
     today = pd.Timestamp.today().normalize()
     start = pd.Timestamp(args.date) if args.date else None
@@ -265,9 +285,8 @@ def cmd_recommend(args):
         raise SystemExit(f"No games between {start.date()} and {(end - pd.Timedelta(days=1)).date()}.")
     live = start >= today
     settings = load_settings(min_edge=args.min_edge, max_odds_age_minutes=args.max_odds_age)
-    now = parse_utc(args.now) if args.now else now_utc()
     model, coefs, preds, rows, contexts, notes, art = analyze(
-        games, feat, qbr, day, start, live, settings, refresh=not args.no_refresh, now=now)
+        games, feat, qbr, day, start, live, settings, refresh=not args.no_refresh, clock=clock)
     for n in notes:
         print(f"  ! {n}")
     if rows.empty:
@@ -316,7 +335,7 @@ def cmd_recommend(args):
     show.to_csv(path, index=False)
     print(f"Saved {path.relative_to(ROOT)}")
     if live:
-        record(rows, preds, art, settings, now, args, games)
+        record(rows, preds, art, settings, clock, args, games)
 
 
 def cmd_validate(args):
@@ -432,7 +451,8 @@ def cmd_collect(args):
     Run it on a schedule (e.g. hourly, and around kickoff - 60 minutes) to build the
     timestamped history that horizon-matched evaluation needs. Nothing is backfilled."""
     settings = load_settings(max_odds_age_minutes=args.max_odds_age)
-    now = now_utc()
+    clock = runtime.Clock()
+    now = clock.stamp("run_started")
     games = load_games(refresh=not args.no_refresh)
     games = games.assign(kickoff_utc=[_kick(d, t) for d, t in zip(games["gameday"], games["gametime"])])
     window = games[(games["kickoff_utc"] > now) & (games["kickoff_utc"] <= now + pd.Timedelta(days=args.days))]
@@ -440,12 +460,14 @@ def cmd_collect(args):
         raise SystemExit(f"No games kicking off in the next {args.days} days.")
     kick = inputs.kickoff_map(window)
     books, consensus, notes = gather_offers(window, kick, settings)
-    valid, rejected = validate_offers(books, kick, now, settings)
+    collected = clock.stamp("odds_collected")
+    valid, rejected = validate_offers(books, kick, collected, settings)
     season = int(window["season"].iloc[0])
     inj = load_injuries(season, refresh=not args.no_refresh)
-    weather, rej_wx = inputs.load_weather(window, settings, now)
+    clock.stamp("injuries_retrieved")
+    weather, rej_wx = inputs.load_weather(window, settings, clock.stamp("inputs_read"))
     save_sources()
-    run_utc = fmt(now)
+    run_utc = fmt(collected)
     run_id = "collect_" + run_utc.replace(":", "").replace("-", "")
     sid, d = store.save_snapshot(
         run_id,
@@ -454,12 +476,12 @@ def cmd_collect(args):
         frames={"schedule_rows.csv": window, "offers_raw.csv": books, "offers_valid.csv": valid,
                 "offers_rejected.csv": rejected, "consensus.csv": consensus, "inputs_rejected.csv": rej_wx,
                 "weather_accepted.csv": pd.DataFrame(list(weather.values()))},
-        meta={"run_utc": run_utc, "settings": vars(settings), "notes": notes})
+        meta={"settings": vars(settings), "notes": notes, **clock.as_dict()})
     store.append(store.COLLECTIONS, "collection", [{
-        "run_id": run_id, "snapshot_id": sid, "run_utc": run_utc, "games": int(len(window)),
+        "run_id": run_id, "snapshot_id": sid, **clock.as_dict(), "games": int(len(window)),
         "valid_quotes": int(len(valid)), "rejected_quotes": int(len(rejected)),
         "books": int(valid["book"].nunique()) if len(valid) else 0, "injury_rows": int(len(inj))}],
-        recorded_utc=run_utc)
+        )
     n_wx = store.archive_weather(weather, run_id) if weather else 0
     for x in rej_wx.itertuples(index=False):
         notes.append(f"{x.file} row rejected ({x.game_id}): {x.reason}")

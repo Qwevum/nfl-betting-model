@@ -128,13 +128,21 @@ TIER = {"BET": "executable", "BET IF CONFIRMED": "conditional",
 
 
 def record_forecasts(rows: pd.DataFrame, run: dict, path: Path = FORECASTS) -> list[dict]:
+    """Append forecasts stamped with the ACTUAL write time. `run` must carry
+    prediction_completed_utc; a record can never be timestamped before it."""
+    completed = parse_utc(run["prediction_completed_utc"])
+    if now_utc() < completed:
+        raise StoreError("prediction_completed_utc is in the future; refusing to record")
     recs = []
     for r in rows.to_dict("records"):
         d = {k: r.get(k) for k in FORECAST_FIELDS}
         d["tier"] = TIER.get(r.get("decision"), "pass")
         d.update(run)
         recs.append(d)
-    return append(path, "forecast", recs, recorded_utc=run.get("run_utc"))
+    out = append(path, "forecast", recs)
+    if out and parse_utc(out[0]["recorded_utc"]) < completed:
+        raise StoreError("recorded time precedes prediction completion")
+    return out
 
 
 def forecasts_frame(path: Path = FORECASTS) -> pd.DataFrame:

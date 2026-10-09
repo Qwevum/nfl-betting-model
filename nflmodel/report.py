@@ -83,8 +83,15 @@ def game_section(g, ctx: GameContext, rows: pd.DataFrame, coefs: dict, model, se
     return "\n".join(out) + "\n"
 
 
-def header(season, week, sources: dict, version: str, model, settings, validation: str | None) -> str:
-    out = [f"# NFL {season} Week {week} - model report", "",
+def header(season, week, sources: dict, version: str, model, settings, validation: str | None,
+           timeline: dict | None = None, simulated: bool = False) -> str:
+    out = [f"# NFL {season} Week {week} - model report", ""]
+    if simulated:
+        out += ["> **SIMULATED RUN** (`--now`): the clock is fixed, nothing is recorded, and this is not a "
+                "prospective forecast.", ""]
+    if timeline:
+        out += ["Run timeline (UTC): " + ", ".join(f"{k.replace('_utc', '')} {v}" for k, v in timeline.items()), ""]
+    out += [
            f"Model version `{version}`. Flag threshold: EV > {settings.min_edge:.1%} at the available price. "
            f"Stakes: {settings.kelly_fraction:g} x full Kelly, capped at {settings.max_stake_units:g} units. "
            f"Model-vs-market gap rule: {settings.gap_points:g} pts.", "",
