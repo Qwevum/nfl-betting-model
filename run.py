@@ -68,7 +68,9 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
     coefs = model.pure.raw_coefs()
     notes = []
     art = {"offers_raw": pd.DataFrame(), "offers_rejected": pd.DataFrame(), "offers_valid": pd.DataFrame(),
-           "consensus": pd.DataFrame(), "references": pd.DataFrame(), "injury_season": None}
+           "consensus": pd.DataFrame(), "references": pd.DataFrame(), "injury_season": None,
+           "inputs_rejected": pd.DataFrame(columns=inputs.REJECT_COLS), "weather_accepted": pd.DataFrame(),
+           "qb_accepted": pd.DataFrame()}
 
     overrides, weather = {}, {}
     if live:
@@ -79,9 +81,15 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
         day = day.drop(started.index)
         if day.empty:
             return model, coefs, model.predict(day), pd.DataFrame(), {}, notes, art
-        overrides, n1 = inputs.load_qb_overrides(day, settings.kickoff_match_minutes)
-        weather, n2 = inputs.load_weather(day, settings.kickoff_match_minutes)
-        notes += n1 + n2
+        # validate user inputs against the decision time and kickoff; only accepted rows are applied
+        overrides, rej_qb = inputs.load_qb_overrides(day, settings, now)
+        weather, rej_wx = inputs.load_weather(day, settings, now)
+        rejected_inputs = pd.concat([rej_qb, rej_wx], ignore_index=True)
+        art.update(inputs_rejected=rejected_inputs, qb_accepted=pd.DataFrame(list(overrides.values())),
+                   weather_accepted=pd.DataFrame(list(weather.values())))
+        for x in rejected_inputs.itertuples(index=False):
+            notes.append(f"{x.file} row rejected ({x.game_id}{', ' + x.team if isinstance(x.team, str) else ''}): "
+                         f"{x.reason}")
         day = inputs.apply_qb_overrides(day, overrides, games, qbr)
         day = inputs.apply_weather(day, weather)
 
@@ -124,6 +132,10 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
     for g in preds.itertuples(index=False):
         if live:
             ctx = decide.build_context(g, inj, SOURCES, coefs, model.k_spread, overrides, weather, settings)
+            rej = art["inputs_rejected"]
+            for x in rej[rej["game_id"] == g.game_id].itertuples(index=False):
+                ctx.missing.append(f"{x.file} row rejected and NOT applied"
+                                   f"{' (' + x.team + ')' if isinstance(x.team, str) else ''}: {x.reason}")
         else:  # historical: only the rules that can be applied from data available then
             ctx = decide.GameContext()
             if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= settings.gap_points:
@@ -164,7 +176,8 @@ def record(rows, preds, art, settings, now, args, games) -> None:
         frames={"schedule_rows.csv": slate, "offers_raw.csv": art["offers_raw"],
                 "offers_rejected.csv": art["offers_rejected"], "offers_valid.csv": art["offers_valid"],
                 "consensus.csv": art["consensus"], "references.csv": art["references"],
-                "predictions.csv": preds},
+                "inputs_rejected.csv": art["inputs_rejected"], "qb_accepted.csv": art["qb_accepted"],
+                "weather_accepted.csv": art["weather_accepted"], "predictions.csv": preds},
         meta={"run_utc": run_utc, "model_version": version, "settings": vars(settings)})
     kick = dict(zip(preds["game_id"], preds["kickoff_utc"].map(fmt)))
     recs = store.record_forecasts(

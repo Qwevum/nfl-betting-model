@@ -114,9 +114,9 @@ class GameKeys(unittest.TestCase):
                          "2026_05_CIN_MIA,2026-10-11T17:00:00Z,MIA,Some QB,team,2026-10-11T15:30:00Z\n"
                          "2026_05_CIN_MIA,2026-10-11T17:00:00Z,BUF,Other QB,team,2026-10-11T15:30:00Z\n"
                          "2026_05_CIN_MIA,2026-10-11T17:00:00Z,CIN,No Time QB,team,\n")
-            got, notes = inputs.load_qb_overrides(day, 10, p)
+            got, rejected = inputs.load_qb_overrides(day, S, parse_utc("2026-10-11T16:00:00Z"), p)
         self.assertEqual(list(got), [("2026_05_CIN_MIA", "MIA")])
-        self.assertEqual(len(notes), 2)
+        self.assertEqual(len(rejected), 2)
 
     def test_odds_api_matches_on_kickoff_not_just_teams(self):
         games = pd.DataFrame([{"game_id": "A", "home_team": "MIA", "away_team": "CIN"},

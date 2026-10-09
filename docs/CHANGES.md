@@ -451,3 +451,58 @@ the model's own-line error but don't improve the market-anchored probabilities.
   The suite passes: 66 tests.
 * A historical replay of 2020 with `max_stake_units=0.5` gives the same 104
   bets, with the largest stake 0.5u instead of 2u.
+
+## 9. Validate QB confirmations and weather forecasts against the decision time and kickoff
+
+**Problem:**
+* `confirmed_utc` and `forecast_utc` only had to parse. A confirmation dated
+  after the run, after kickoff or a week earlier was accepted.
+* A forecast had no retrieval time, valid-for time or freshness limit.
+* Negative, NaN or infinite wind and non-numeric temperatures were accepted.
+* Any such row could clear a starter-availability condition or unlock an
+  outdoor total.
+
+**Files:** `nflmodel/inputs.py`, `nflmodel/config.py`, `run.py`,
+`qb_overrides.csv` / `weather_manual.csv` (headers), `tests/test_inputs.py`
+(new), `tests/test_offers.py`.
+
+**Change:**
+* `load_qb_overrides(day, settings, decision_utc)` and `load_weather(...)`
+  validate every row before anything is applied. A row is rejected for:
+  * a game or kickoff that doesn't match the schedule
+  * a blank `source`, `qb_name` or `team`
+  * a missing or naive timestamp
+  * a timestamp after the decision time (plus clock skew)
+  * a timestamp at or after kickoff
+  * staleness: `qb_confirm_max_age_minutes` (48 h) or
+    `weather_max_age_minutes` (12 h)
+  * wind that isn't finite or isn't between 0 and 100 mph
+  * temperature that isn't finite or isn't between −60 and 130 °F
+  * a retrieval time before the issue time
+  * a `valid_for_utc` more than `weather_valid_window_minutes` (180) from
+    kickoff
+  * a duplicate row
+* Weather rows need two new columns, `retrieved_utc` and `valid_for_utc`.
+* Rejections are kept with their reasons: printed, listed per game under
+  "Missing or stale information" ("row rejected and NOT applied"), and saved to
+  `inputs_rejected.csv` in the snapshot. Accepted rows are saved as
+  `qb_accepted.csv` / `weather_accepted.csv`.
+
+**Verification:**
+* 12 new tests:
+  * future, post-kickoff and stale confirmations are rejected, and the age
+    limit is configurable
+  * blank source, blank name, naive and missing times are rejected
+  * future, post-kickoff and stale forecasts are rejected
+  * eight kinds of invalid wind/temperature values are rejected
+  * missing source, retrieval-before-issue and a valid-for time far from
+    kickoff are rejected
+  * decision level: a rejected confirmation leaves the bet "BET IF CONFIRMED",
+    while valid ones give "BET"
+  * decision level: a rejected forecast leaves the outdoor total blocked, while
+    a valid one unblocks it
+
+  The suite passes: 78 tests.
+* Replay at 2026-10-11T12:30Z with three QB rows and three weather rows: the
+  blank-source and future-dated QB rows, the negative-wind forecast and the
+  stale forecast were rejected and listed; only the valid rows were applied.

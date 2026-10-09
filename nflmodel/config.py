@@ -29,6 +29,10 @@ class Settings:
     max_odds_age_minutes: float = 30.0     # older quotes are stale and rejected
     clock_skew_minutes: float = 2.0        # tolerated future timestamps (clock drift)
     kickoff_match_minutes: float = 10.0    # input rows must match the schedule kickoff this closely
+    # User inputs (qb_overrides.csv, weather_manual.csv): how old they may be at the decision time
+    qb_confirm_max_age_minutes: float = 48 * 60    # a starter confirmation older than this is stale
+    weather_max_age_minutes: float = 12 * 60       # forecasts update often; older issues are stale
+    weather_valid_window_minutes: float = 180      # forecast's valid-for time must be this close to kickoff
     # Market reference
     min_reference_books: int = 2           # other books needed for a reference (leave-one-book-out)
     # Prediction horizon: forecasts are meant to be made this long before kickoff
@@ -52,6 +56,9 @@ _RULES = [
     ("clock_skew_minutes", float, 0, True, 60, True),
     ("kickoff_match_minutes", float, 0, True, 24 * 60, True),
     ("min_reference_books", int, 1, True, 50, True),
+    ("qb_confirm_max_age_minutes", float, 0, False, 14 * 24 * 60, True),
+    ("weather_max_age_minutes", float, 0, False, 7 * 24 * 60, True),
+    ("weather_valid_window_minutes", float, 0, False, 24 * 60, True),
     ("horizon_minutes", float, 0, False, 7 * 24 * 60, True),
     ("min_edge", float, 0, True, 1, False),
     ("gap_points", float, 0, False, 60, True),
