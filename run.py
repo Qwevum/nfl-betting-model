@@ -5,7 +5,8 @@
   python run.py recommend [--date YYYY-MM-DD]        decision table for a game day (live or historical)
   python run.py validate [--from 2015]               out-of-sample validation vs baselines and market
   python run.py ratings                              current team power ratings
-  python run.py grade                                forecasts, recommendations and wagers, graded separately
+  python run.py grade [--season S --weeks A-B]       forecasts, recommendations and wagers, graded separately
+  python run.py coverage --season S --weeks A-B      which slate games have horizon-eligible forecasts
   python run.py place --forecast ID --stake U        record a wager you actually placed
   python run.py verify-log                           check the hash chains of history and ledger
   python run.py collect [--days 7]                   snapshot odds + injuries for upcoming games (no model)
@@ -567,6 +568,21 @@ def cmd_templates(args):
     print("Copy the rows you need into odds_manual.csv / qb_overrides.csv / weather_manual.csv.")
 
 
+def _slate_from_args(args, games):
+    """Explicit evaluation slate from --season/--week(s) or --from/--to."""
+    if args.date_from or args.date_to:
+        season = args.season
+        desc = f"{args.date_from or '...'} to {args.date_to or '...'}" + (f", season {season}" if season else "")
+        return track.define_slate(games, season=season, date_from=args.date_from, date_to=args.date_to), desc
+    season = args.season or int(games.loc[games["result"].notna(), "season"].max())
+    weeks = None
+    if args.weeks:
+        a, _, b = args.weeks.partition("-")
+        weeks = (int(a), int(b or a))
+    desc = f"season {season}" + (f", weeks {weeks[0]}-{weeks[1]}" if weeks else ", all weeks")
+    return track.define_slate(games, season=season, weeks=weeks), desc
+
+
 def cmd_grade(args):
     games = load_games(refresh=not args.no_refresh)
     settings = load_settings()
@@ -575,10 +591,30 @@ def cmd_grade(args):
         print(f"{path.relative_to(ROOT)}: {msg}")
         if not ok:
             raise SystemExit("integrity check failed; not grading")
-    g = track.grade_all(games, settings)
-    track.report(g, settings)
+    slate, desc = _slate_from_args(args, games)
+    markets = tuple(args.markets.split(","))
+    now = parse_utc(args.now) if args.now else now_utc()
+    g = track.grade_all(games, settings, slate=slate, now=now, markets=markets)
+    track.report(g, settings, f"{desc}; markets {','.join(markets)}")
     for name, df in g.items():
         df.to_csv(ROOT / "logs" / f"graded_{name}.csv", index=False)
+
+
+def cmd_coverage(args):
+    """Coverage of the forecast history against an explicit slate (writes nothing)."""
+    games = load_games(refresh=not args.no_refresh)
+    settings = load_settings()
+    ok, msg = store.verify(store.FORECASTS)
+    print(f"{store.FORECASTS.relative_to(ROOT)}: {msg}")
+    if not ok:
+        raise SystemExit("integrity check failed")
+    slate, desc = _slate_from_args(args, games)
+    markets = tuple(args.markets.split(","))
+    now = parse_utc(args.now) if args.now else now_utc()
+    games_cov, mk, _ = track.slate_coverage(slate, store.forecasts_frame(), settings, now, markets)
+    track.print_coverage(f"{desc}; markets {','.join(markets)}", games_cov, mk, settings)
+    if args.list:
+        print(games_cov.to_string(index=False))
 
 
 def cmd_place(args):
@@ -616,7 +652,16 @@ def main():
     r.add_argument("--markets", default="spread,ml,total", help="comma list of spread,ml,total")
     r.add_argument("--all", action="store_true", help="show both sides of every market")
     v = sub.add_parser("validate"); v.add_argument("--from", dest="start", type=int, default=2015)
-    sub.add_parser("ratings"); sub.add_parser("grade")
+    sub.add_parser("ratings")
+    gr = sub.add_parser("grade", help="forecasts on an explicit slate, recommendations, wagers")
+    cv = sub.add_parser("coverage", help="forecast coverage of an explicit slate (writes nothing)")
+    cv.add_argument("--list", action="store_true", help="print every game's status")
+    for x in (gr, cv):
+        x.add_argument("--season", type=int, help="default: latest season with results")
+        x.add_argument("--weeks", help="week or range, e.g. 5 or 5-8 (default: all weeks)")
+        x.add_argument("--from", dest="date_from", help="first game date YYYY-MM-DD (instead of weeks)")
+        x.add_argument("--to", dest="date_to", help="last game date YYYY-MM-DD")
+        x.add_argument("--markets", default="spread,ml,total", help="comma list of spread,ml,total")
     pl = sub.add_parser("place", help="record a wager you actually placed")
     pl.add_argument("--forecast", required=True, help="forecast id (hash prefix) printed by predict")
     pl.add_argument("--stake", type=float, required=True, help="units staked")
@@ -647,7 +692,8 @@ def main():
     {"predict": cmd_predict, "recommend": cmd_recommend, "validate": cmd_validate,
      "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates,
      "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log,
-     "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live}[args.cmd](args)
+     "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live,
+     "coverage": cmd_coverage}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -812,3 +812,50 @@ decide_game` path, with a synthetic market-only model and a step clock:
 8. **No offers left** gives empty rows without error.
 
 The suite passes: 113 tests. A replay with three manual books runs end to end.
+
+## 18. Coverage reported against an explicit slate
+
+**Problem:** horizon coverage (change 12) looked only at games already in the
+forecast history. A game with no forecast at all was invisible, so coverage
+could look complete when most games were never forecast.
+
+**Files:** `nflmodel/track.py` (`define_slate`, `slate_coverage`,
+`coverage_summary`, `print_coverage`; `grade_all`/`report` take a slate),
+`run.py` (`coverage` command; `grade` slate options), `README.md`,
+`tests/test_coverage.py` (new).
+
+**Change:**
+* The slate comes from the schedule: a season plus a week range, or a date
+  range, plus the requested markets.
+* Every slate game gets one status:
+  * eligible: a run issued inside `[kickoff − horizon − tolerance, kickoff − horizon]`
+  * forecasts exist, none qualify: with the reason
+  * no forecast recorded
+  * window not closed: before kickoff − horizon, so not counted as missed
+  * unknown kickoff
+* Counts and percentages use an explicit denominator: games whose window has
+  closed.
+* Market coverage within eligible games shows forecast and market-reference
+  availability per market, and lists the missing games.
+* One run per game and identical model-vs-market rows are unchanged; only
+  eligible slate games are scored.
+* With no slate, `grade_all` falls back to the games in the history, using the
+  kickoffs recorded there.
+
+**Verification:** 5 new tests:
+* slate selection by week and by date
+* an empty history: no forecast, window not closed, unknown kickoff, and the
+  denominator excludes the latter two
+* an out-of-window forecast ("none qualify", with the window reason), plus
+  partial market coverage (ml missing for a spread-only eligible game)
+* scoring restricted to eligible games, one run
+* a future game with an early forecast is not counted as missed
+* the market filter, and forecasts outside the slate ignored
+
+The suite passes: 118 tests.
+
+**Real history, 2026 weeks 1–6:** 93 games.
+* 65 have closed windows (the denominator): 0 eligible, 1 with forecasts
+  that don't qualify (TB @ DAL, legacy timestamps), 64 with no forecast
+  recorded.
+* 28 have windows not yet closed.

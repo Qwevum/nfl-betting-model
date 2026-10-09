@@ -21,7 +21,8 @@ python run.py collect                 # snapshot quotes + injury reports (run on
 python run.py predict                 # report for the upcoming week; records every forecast
 python run.py recommend               # compact table for the next game day
 python run.py place --forecast ID --stake 1   # record a wager you actually placed
-python run.py grade                   # forecasts, recommendations and wagers, graded separately
+python run.py coverage --season 2026 --weeks 5-8   # which slate games have horizon-eligible forecasts
+python run.py grade --season 2026 --weeks 5-8      # forecasts, recommendations and wagers, graded separately
 python run.py verify-log              # integrity check of all hash-chained logs
 python run.py validate                # out-of-sample validation (about 6 minutes)
 ```
@@ -229,6 +230,25 @@ results in `docs/EXPERIMENTS.md`):
   unchanged baseline under a pre-registered protocol.
 * None improved out-of-sample probabilities on the 2015–2021 development
   seasons. None was evaluated on the holdout, and none is used live.
+
+## Coverage of an explicit slate
+
+`python run.py coverage` (and the first section of `grade`) compares the forecast
+history with **every scheduled game** in a slate.
+* Choose the slate with `--season` plus `--weeks 5` or `--weeks 5-8`, or with
+  `--from YYYY-MM-DD --to YYYY-MM-DD`; choose markets with
+  `--markets spread,ml,total`.
+* Each game gets exactly one status:
+  * eligible: a run was issued inside the horizon window
+  * forecasts exist, none qualify: with the reason
+  * no forecast recorded
+  * window not closed: not counted as missed
+  * unknown kickoff
+* Percentages use a stated denominator: the games whose window has closed.
+* Within eligible games, the report lists markets with no forecast or no market
+  reference.
+* It works with an empty history, writes nothing, and never creates or backfills
+  forecasts. `--list` prints every game's status.
 
 ## Forecast history, snapshots and the bet ledger
 

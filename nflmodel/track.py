@@ -118,20 +118,156 @@ def at_horizon(fc: pd.DataFrame, settings) -> tuple[pd.DataFrame, pd.DataFrame]:
     return sel, pd.DataFrame(cov, columns=cols)
 
 
-def grade_all(games: pd.DataFrame, settings, forecasts_path: Path = store.FORECASTS,
-              ledger_path: Path = store.LEDGER) -> dict:
+# ---------------------------------------------------------------- explicit evaluation slate
+
+MARKETS = ("spread", "ml", "total")
+STATUS_ORDER = ["eligible", "forecasts exist, none qualify", "no forecast recorded", "window not closed",
+                "unknown kickoff"]
+
+
+def define_slate(games: pd.DataFrame, season: int | None = None, weeks: tuple[int, int] | None = None,
+                 date_from=None, date_to=None) -> pd.DataFrame:
+    """Every scheduled game in the requested slate (season + week range, or a date range).
+
+    Returns game_id, season, week, kickoff_utc (NaT if unknown), away/home teams, played."""
+    from .timeutil import kickoff_utc
+    g = games.copy()
+    if season is not None:
+        g = g[g["season"] == season]
+    if weeks is not None:
+        g = g[(g["week"] >= weeks[0]) & (g["week"] <= weeks[1])]
+    if date_from is not None:
+        g = g[pd.to_datetime(g["gameday"]) >= pd.Timestamp(date_from)]
+    if date_to is not None:
+        g = g[pd.to_datetime(g["gameday"]) <= pd.Timestamp(date_to)]
+
+    def kick(d, t):
+        try:
+            return kickoff_utc(d, t)
+        except ValueError:
+            return pd.NaT
+    out = pd.DataFrame({"game_id": g["game_id"], "season": g["season"], "week": g["week"],
+                        "away_team": g["away_team"], "home_team": g["home_team"],
+                        "kickoff_utc": [kick(d, t) for d, t in zip(g["gameday"], g["gametime"])],
+                        "played": g["result"].notna() if "result" in g else False})
+    return out.reset_index(drop=True)
+
+
+def slate_coverage(slate: pd.DataFrame, fc: pd.DataFrame, settings, now: pd.Timestamp,
+                   markets=MARKETS) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """(per-game status, per-market coverage among eligible games, selected forecast rows).
+
+    Every slate game gets exactly one status. A game whose evaluation window
+    [kickoff - horizon - tolerance, kickoff - horizon] has not closed yet is never counted
+    as missed. Forecasts are never created or backfilled here."""
+    fc = fc if fc is not None else pd.DataFrame()
+    if len(fc):
+        fc = fc[fc["game_id"].isin(slate["game_id"]) & fc["market"].isin(markets)]
+    sel, cov = at_horizon(fc, settings) if len(fc) else (pd.DataFrame(), pd.DataFrame())
+    elig = set(cov.loc[cov["status"] == "eligible", "game_id"]) if len(cov) else set()
+    why = dict(zip(cov["game_id"], cov["reason"])) if len(cov) else {}
+    lead = dict(zip(cov["game_id"], cov["lead_minutes"])) if len(cov) else {}
+    has_fc = set(fc["game_id"]) if len(fc) else set()
+    rows = []
+    for g in slate.itertuples(index=False):
+        k = g.kickoff_utc
+        closes = None if pd.isna(k) else k - pd.Timedelta(minutes=settings.horizon_minutes)
+        if pd.isna(k):
+            status, reason = "unknown kickoff", "kickoff time not listed in the schedule"
+        elif g.game_id in elig:
+            status, reason = "eligible", ""
+        elif now < closes:
+            status, reason = "window not closed", f"evaluation window closes {fmt_ts(closes)}"
+        elif g.game_id in has_fc:
+            status, reason = "forecasts exist, none qualify", why.get(g.game_id, "")
+        else:
+            status, reason = "no forecast recorded", ""
+        rows.append({"game_id": g.game_id, "week": g.week, "kickoff_utc": None if pd.isna(k) else fmt_ts(k),
+                     "status": status, "reason": reason, "played": bool(g.played),
+                     "lead_minutes": lead.get(g.game_id) if status == "eligible" else None})
+    games_cov = pd.DataFrame(rows, columns=["game_id", "week", "kickoff_utc", "status", "reason", "played",
+                                            "lead_minutes"])
+    mk = []
+    if len(sel):
+        sel = sel[sel["game_id"].isin(elig)]
+    for m in markets:
+        s_m = sel[sel["market"] == m] if len(sel) else pd.DataFrame()
+        with_fc = set(s_m["game_id"]) if len(s_m) else set()
+        with_ref = set(s_m.dropna(subset=["market_prob"])["game_id"]) if len(s_m) else set()
+        mk.append({"market": m, "eligible_games": len(elig), "with_forecast": len(with_fc),
+                   "with_market_reference": len(with_ref), "missing": len(elig - with_fc),
+                   "missing_games": ",".join(sorted(elig - with_fc))})
+    return games_cov, pd.DataFrame(mk), sel
+
+
+def fmt_ts(ts) -> str:
+    return pd.Timestamp(ts).tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def coverage_summary(games_cov: pd.DataFrame) -> pd.DataFrame:
+    """Counts and percentages. Denominator: games whose window has closed (unknown kickoffs
+    and still-open windows are listed separately and excluded from the denominator)."""
+    closed = games_cov[games_cov["status"].isin(STATUS_ORDER[:3])]
+    denom = len(closed)
+    rows = []
+    for st in STATUS_ORDER:
+        n = int((games_cov["status"] == st).sum())
+        pct = (n / denom) if st in STATUS_ORDER[:3] and denom else None
+        rows.append({"status": st, "games": n, "pct_of_closed_windows": pct})
+    return pd.DataFrame(rows)
+
+
+def print_coverage(slate_desc: str, games_cov: pd.DataFrame, mk: pd.DataFrame, settings) -> None:
+    lo = settings.horizon_minutes + settings.horizon_tolerance_minutes
+    summ = coverage_summary(games_cov)
+    closed = int(summ.loc[summ["status"].isin(STATUS_ORDER[:3]), "games"].sum())
+    print(f"\nCOVERAGE for slate: {slate_desc} ({len(games_cov)} scheduled games)")
+    print(f"  horizon window: {lo:g}-{settings.horizon_minutes:g} min before kickoff; "
+          f"denominator = {closed} game(s) whose window has closed")
+    for r in summ.itertuples(index=False):
+        pct = "" if r.pct_of_closed_windows is None or pd.isna(r.pct_of_closed_windows) \
+            else f" ({r.pct_of_closed_windows:.1%})"
+        note = "" if r.status in STATUS_ORDER[:3] else "  [not in denominator]"
+        print(f"  {r.status:30s} {r.games:4d}{pct}{note}")
+    ex = games_cov[games_cov["status"] == "forecasts exist, none qualify"]
+    for why, n in ex["reason"].value_counts().items():
+        print(f"    - {n} game(s): {why}")
+    el = games_cov[games_cov["status"] == "eligible"]
+    if len(el):
+        lead = el["lead_minutes"].astype(float)
+        print(f"  lead time of selected runs: min {lead.min():.0f}, median {lead.median():.0f}, "
+              f"max {lead.max():.0f} min")
+    if len(mk) and mk["eligible_games"].iloc[0]:
+        print("  market coverage within eligible games:")
+        for r in mk.itertuples(index=False):
+            print(f"    {r.market:6s} forecast {r.with_forecast}/{r.eligible_games}, with market reference "
+                  f"{r.with_market_reference}/{r.eligible_games}"
+                  + (f", missing: {r.missing_games}" if r.missing else ""))
+
+
+def grade_all(games: pd.DataFrame, settings, slate: pd.DataFrame | None = None, now: pd.Timestamp | None = None,
+              markets=MARKETS, forecasts_path: Path = store.FORECASTS, ledger_path: Path = store.LEDGER) -> dict:
+    """Forecast quality on an explicit slate, recommendations, and actual wagers (separately).
+
+    slate: from define_slate(); when None, the slate is every game that appears in the
+    forecast history (games with no forecast are then invisible, so pass a slate)."""
+    from .timeutil import now_utc
     out = {}
     fc = store.forecasts_frame(forecasts_path)
-    if not fc.empty:
-        sel, cov = at_horizon(fc, settings)
+    if slate is None:   # fallback: games that appear in the history, kickoffs as recorded there
+        k = fc[["game_id", "kickoff_utc"]].drop_duplicates("game_id") if len(fc) else \
+            pd.DataFrame(columns=["game_id", "kickoff_utc"])
         played = set(games.loc[games["result"].notna(), "game_id"]) if "result" in games else set()
-        cov["played"] = cov["game_id"].isin(played)
-        out["coverage"] = cov
-        if len(sel):
-            h = _results(sel, games)
-            h["clv"] = h.apply(_clv, axis=1)
-            h["flat_units"] = [profit(r, p) if r else np.nan for r, p in zip(h["result"], h["price"])]
-            out["forecasts"] = h
+        slate = pd.DataFrame({"game_id": k["game_id"], "week": None,
+                              "kickoff_utc": [parse_utc(x) if isinstance(x, str) else pd.NaT for x in k["kickoff_utc"]],
+                              "played": k["game_id"].isin(played)})
+    games_cov, mk, sel = slate_coverage(slate, fc, settings, now or now_utc(), markets)
+    out["coverage"], out["market_coverage"] = games_cov, mk
+    if len(sel):
+        h = _results(sel, games)
+        h["clv"] = h.apply(_clv, axis=1)
+        h["flat_units"] = [profit(r, p) if r else np.nan for r, p in zip(h["result"], h["price"])]
+        out["forecasts"] = h
     led = store.ledger_frame(ledger_path)
     if not led.empty:
         led = _results(led[led["voided"].isna()].copy(), games)
@@ -159,31 +295,20 @@ def score_table(fc: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def report(g: dict, settings) -> None:
-    fc, cov = g.get("forecasts"), g.get("coverage")
-    lo = settings.horizon_minutes + settings.horizon_tolerance_minutes
-    print(f"\n1) FORECAST QUALITY: one run per game issued {lo:g}-{settings.horizon_minutes:g} min before kickoff")
-    if cov is None or cov.empty:
-        print("   no forecasts recorded yet")
-    else:
-        el, ex = cov[cov["status"] == "eligible"], cov[cov["status"] == "excluded"]
-        print(f"   games with forecasts: {len(cov)}; eligible {len(el)}; excluded {len(ex)}; "
-              f"eligible and played {int((el['played']).sum())}")
-        for why, n in ex["reason"].value_counts().items():
-            print(f"     excluded ({n}): {why}")
-        if len(el):
-            lead = el["lead_minutes"]
-            print(f"   actual lead times of selected runs: min {lead.min():.0f}, median {lead.median():.0f}, "
-                  f"max {lead.max():.0f} min before kickoff")
+def report(g: dict, settings, slate_desc: str = "games in forecast history") -> None:
+    fc = g.get("forecasts")
+    print("\n1) FORECAST QUALITY (one run per game inside the horizon window)")
+    if "coverage" in g:
+        print_coverage(slate_desc, g["coverage"], g.get("market_coverage", pd.DataFrame()), settings)
     if fc is not None and len(fc):
         t = score_table(fc)
         if t.empty:
-            print("   no graded eligible rows with both model and market probabilities yet")
+            print("  no graded eligible rows with both model and market probabilities yet")
         else:
-            print("   model vs market on identical graded rows:")
-            print("   " + t.round(4).to_string(index=False).replace("\n", "\n   "))
+            print("  model vs market on identical graded rows:")
+            print("  " + t.round(4).to_string(index=False).replace("\n", "\n  "))
             if t["games"].sum() < 50:
-                print("   ! fewer than 50 games: far too few to distinguish model from market")
+                print("  ! fewer than 50 games: far too few to distinguish model from market")
     print("\n2) RECOMMENDATIONS (hypothetical, flat 1u; these are NOT wagers), from the selected runs")
     if fc is None or fc.empty:
         print("   none")
