@@ -41,19 +41,30 @@ FEATURES = ["f_mrtg", "f_epa", "f_sr", "f_pass", "f_qb", "f_hfa", "f_rest", "f_d
 # for reports; live forecasts only drive the "no outdoor total without a forecast" rule.
 TOTAL_FEATURES = ["t_off", "t_def", "t_pace", "t_pts", "t_dome"]
 
+# Experimental feature groups (docs/EXPERIMENTS.md): (margin features, total features).
+# Off by default; enabled only through `--features` / validate.run(extra=...).
+EXPERIMENT_GROUPS = {
+    "G1": (["f_rush"], ["t_rush"]),
+    "G2": ([], ["t_npace"]),
+    "G3": (["f_avail"], ["t_avail"]),
+    "G4": (["f_olc"], ["t_olc"]),
+}
+
 
 class _Team:
     __slots__ = ("mrtg", "off", "def_", "osr", "dsr", "opass", "dpass", "pace", "pf", "pa", "season",
-                 "qb_base", "last_qb")
+                 "qb_base", "last_qb", "orush", "drush", "npace")
 
     def __init__(self, season: int, pace: float = 62.0, pts: float = 22.0):
         self.mrtg = self.off = self.def_ = self.osr = self.dsr = self.opass = self.dpass = 0.0
         self.pace, self.pf, self.pa, self.season = pace, pts, pts, season
         self.qb_base = None
         self.last_qb = None
+        self.orush = self.drush = 0.0
+        self.npace = 32.5
 
     def new_season(self, season: int, carry: float, lg_pace: float, lg_pts: float) -> None:
-        for name in ("mrtg", "off", "def_", "osr", "dsr", "opass", "dpass"):
+        for name in ("mrtg", "off", "def_", "osr", "dsr", "opass", "dpass", "orush", "drush"):
             setattr(self, name, getattr(self, name) * carry)
         self.pace = lg_pace + carry * (self.pace - lg_pace)
         self.pf = lg_pts + carry * (self.pf - lg_pts)
@@ -104,7 +115,7 @@ def build_features(games: pd.DataFrame, team_games: pd.DataFrame, qb_games: pd.D
     games = games[games["season"] >= first_season].copy()
 
     teams: dict[str, _Team] = {}
-    lg = {"epa": 0.0, "sr": 0.44, "pass": 0.05, "pace": 62.0, "pts": 22.0}
+    lg = {"epa": 0.0, "sr": 0.44, "pass": 0.05, "pace": 62.0, "pts": 22.0, "rush": -0.08, "npace": 32.5}
     rows = []
 
     for g in games.itertuples(index=False):
@@ -136,6 +147,10 @@ def build_features(games: pd.DataFrame, team_games: pd.DataFrame, qb_games: pd.D
             "f_sr": (H.osr - H.dsr) - (A.osr - A.dsr),
             "f_pass": (H.opass - H.dpass) - (A.opass - A.dpass),
             "f_qb": h_qbd - a_qbd,
+            # experimental groups (not in FEATURES unless enabled): see docs/EXPERIMENTS.md
+            "f_rush": (H.orush - H.drush) - (A.orush - A.drush),
+            "t_rush": H.orush + A.orush + H.drush + A.drush,
+            "t_npace": H.npace + A.npace,
             "f_hfa": 0.0 if neutral else 1.0,
             "f_rest": float(np.clip(rest, -7, 7)),
             "f_div": float(g.div_game) if pd.notna(g.div_game) else 0.0,
@@ -183,11 +198,18 @@ def build_features(games: pd.DataFrame, team_games: pd.DataFrame, qb_games: pd.D
                 r = s["pass_epa"] - (lg["pass"] + O.opass + D.dpass)
                 O.opass += a_e * r; D.dpass += a_e * r
             O.pace += a_p * (s["plays"] - O.pace)
+            if pd.notna(s.get("rush_epa", np.nan)):
+                r = s["rush_epa"] - (lg["rush"] + O.orush + D.drush)
+                O.orush += a_e * r; D.drush += a_e * r
+            if pd.notna(s.get("neutral_spp", np.nan)):
+                O.npace += a_p * (s["neutral_spp"] - O.npace)
         lg["epa"] += 0.01 * ((hs["epa"] + as_["epa"]) / 2 - lg["epa"])
         lg["sr"] += 0.01 * ((hs["sr"] + as_["sr"]) / 2 - lg["sr"])
         if pd.notna(hs["pass_epa"]) and pd.notna(as_["pass_epa"]):
             lg["pass"] += 0.01 * ((hs["pass_epa"] + as_["pass_epa"]) / 2 - lg["pass"])
         lg["pace"] += 0.01 * ((hs["plays"] + as_["plays"]) / 2 - lg["pace"])
+        if pd.notna(hs.get("rush_epa", np.nan)) and pd.notna(as_.get("rush_epa", np.nan)):
+            lg["rush"] += 0.01 * ((hs["rush_epa"] + as_["rush_epa"]) / 2 - lg["rush"])
 
         # QBs: rate on this game, then move each team's QB baseline toward the
         # dropback-weighted rating of whoever actually played.

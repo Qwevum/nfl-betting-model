@@ -93,7 +93,8 @@ def _decisions(model, test: pd.DataFrame, min_edge: float) -> pd.DataFrame:
 
 
 def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
-        features: list[str] | None = None, with_bets: bool = True, bet_overround: float | None = None):
+        features: list[str] | None = None, with_bets: bool = True, bet_overround: float | None = None,
+        total_features: list[str] | None = None, verbose: bool = True):
     """bet_overround: if set, the betting replay prices every bet at this fixed overround
     (e.g. 0.0476 = -110/-110) instead of the recorded consensus prices."""
     played = feat[feat["result"].notna()]
@@ -103,7 +104,7 @@ def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
         train = played[(played["season"] < s) & (played["season"] > first)]
         if train["season"].nunique() < 3:
             continue
-        model = fit(train, features=features)
+        model = fit(train, features=features, total_features=total_features)
         test = model.predict(played[played["season"] == s]).copy()
 
         # Win probabilities: model and baselines (all fit on training seasons only)
@@ -144,7 +145,8 @@ def run(feat: pd.DataFrame, seasons: list[int], min_edge: float = 0.02,
                                 for r, p, k in zip(d["result"], d["price"], d["kelly"])]
             d["kelly_stake"] = [min(k * decide.KELLY_FRACTION * 100, decide.MAX_STAKE_UNITS) for k in d["kelly"]]
             bets.append(d)
-        print(f"  {s}: {len(test)} games", flush=True)
+        if verbose:
+            print(f"  {s}: {len(test)} games", flush=True)
     return pd.concat(preds, ignore_index=True), (pd.concat(bets, ignore_index=True) if bets else None)
 
 

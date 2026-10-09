@@ -129,17 +129,19 @@ class _Core:
         return out
 
 
-def _fit_core(train: pd.DataFrame, lam: float, features: list[str] | None = None) -> _Core:
+def _fit_core(train: pd.DataFrame, lam: float, features: list[str] | None = None,
+              total_features: list[str] | None = None) -> _Core:
     features = features or FEATURES
+    total_features = total_features or TOTAL_FEATURES
     tr = train.dropna(subset=features + ["result"])
     trb = tr.dropna(subset=["spread_line"])
-    tt = train.dropna(subset=TOTAL_FEATURES + ["total"])
+    tt = train.dropna(subset=total_features + ["total"])
     ttb = tt.dropna(subset=["total_line"])
     return _Core(
         Ridge(features, lam).fit(tr, tr["result"]),
         Ridge(features + ["spread_line"], lam).fit(trb, trb["result"]),
-        Ridge(TOTAL_FEATURES, lam).fit(tt, tt["total"]),
-        Ridge(TOTAL_FEATURES + ["total_line"], lam).fit(ttb, ttb["total"]),
+        Ridge(total_features, lam).fit(tt, tt["total"]),
+        Ridge(total_features + ["total_line"], lam).fit(ttb, ttb["total"]),
     )
 
 
@@ -237,7 +239,7 @@ class FittedModel:
 
 
 def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3,
-        features: list[str] | None = None) -> FittedModel:
+        features: list[str] | None = None, total_features: list[str] | None = None) -> FittedModel:
     """Fit on all of `train`, calibrated on out-of-sample predictions.
 
     Calibration uses an inner walk-forward: each training season (after the first
@@ -245,11 +247,11 @@ def fit(train: pd.DataFrame, lam: float = 5.0, inner_start: int = 3,
     predictions decide how much to trust the model's disagreements with the
     market, and map predicted margins to moneyline win probabilities.
     """
-    core = _fit_core(train, lam, features)
+    core = _fit_core(train, lam, features, total_features)
     seasons = sorted(train["season"].unique())
     oos = []
     for s in seasons[inner_start:]:
-        inner = _fit_core(train[train["season"] < s], lam, features)
+        inner = _fit_core(train[train["season"] < s], lam, features, total_features)
         oos.append(inner.raw(train[train["season"] == s]))
     oos = pd.concat(oos, ignore_index=True)
 

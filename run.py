@@ -441,6 +441,30 @@ def cmd_collect(args):
           f"{len(inj)} injury rows -> {d.relative_to(ROOT)}")
 
 
+def cmd_experiment(args):
+    from nflmodel import availability, experiment
+    version = track.model_version()
+    if version.endswith("-modified") or version == "unknown":
+        raise SystemExit("Experiments are recorded against a commit; commit your changes first.")
+    _, feat, _, _, _ = build(refresh=not args.no_refresh)
+    last = int(feat.loc[feat["result"].notna(), "season"].max())
+    if args.group in ("G3", "G4"):
+        print("Building snap-count availability / OL continuity table ...")
+        tbl = availability.team_game_table(list(range(availability.FIRST_SEASON, last + 1)))
+        feat = availability.add_features(feat, tbl)
+    print(f"Running {args.group} on {'HOLDOUT' if args.holdout else 'development'} seasons ...")
+    rec = experiment.run(feat, args.group, args.holdout, last, version)
+    print(f"\n{rec['group']} ({rec['period']}, seasons {rec['seasons'][0]}-{rec['seasons'][-1]}): {rec['verdict']}")
+    for t in ("winner", "home covers", "over hits"):
+        x = rec["results"][t]
+        print(f"  {t:12s} n={x['n']}  log loss {x['logloss_base']:.5f} -> {x['logloss_exp']:.5f}  "
+              f"diff {x['d_logloss']:+.5f} (95% CI {x['ci_lo']:+.5f} to {x['ci_hi']:+.5f})  "
+              f"improved {x['seasons_improved']}/{x['seasons']} seasons")
+    m = rec["results"]["own_line_mae"]
+    print(f"  own-line MAE margin {m['margin_base']:.3f} -> {m['margin_exp']:.3f}, "
+          f"total {m['total_base']:.3f} -> {m['total_exp']:.3f}")
+
+
 def cmd_templates(args):
     _, feat, _, current, _ = build(refresh=not args.no_refresh)
     season = args.season or current
@@ -482,7 +506,8 @@ def cmd_void(args):
 
 def cmd_verify_log(args):
     bad = False
-    for path in (store.FORECASTS, store.LEDGER, store.COLLECTIONS):
+    from nflmodel import experiment
+    for path in (store.FORECASTS, store.LEDGER, store.COLLECTIONS, experiment.LOG):
         ok, msg = store.verify(path)
         bad |= not ok
         print(f"{path.relative_to(ROOT)}: {'OK' if ok else 'FAILED'} - {msg}")
@@ -511,6 +536,9 @@ def main():
     vo = sub.add_parser("void", help="void a recorded wager (e.g. cancelled by the book)")
     vo.add_argument("--bet-id", required=True); vo.add_argument("--reason", required=True)
     sub.add_parser("verify-log", help="check the forecast history and ledger hash chains")
+    ex = sub.add_parser("experiment", help="ablate one feature group (docs/EXPERIMENTS.md)")
+    ex.add_argument("--group", required=True, choices=["G1", "G2", "G3", "G4"])
+    ex.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
     co = sub.add_parser("collect", help="snapshot odds + injury data for upcoming games (no model)")
     co.add_argument("--days", type=float, default=7, help="games kicking off within this many days")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
@@ -526,7 +554,7 @@ def main():
     {"predict": cmd_predict, "recommend": cmd_recommend, "validate": cmd_validate,
      "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates,
      "place": cmd_place, "void": cmd_void, "verify-log": cmd_verify_log,
-     "collect": cmd_collect}[args.cmd](args)
+     "collect": cmd_collect, "experiment": cmd_experiment}[args.cmd](args)
 
 
 if __name__ == "__main__":

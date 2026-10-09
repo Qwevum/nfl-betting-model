@@ -42,7 +42,7 @@ INJURY_URL = (
 )
 
 FIRST_PBP_SEASON = 2010
-CACHE_VERSION = "v2"   # bump when the cached per-game tables change shape
+CACHE_VERSION = "v3"   # bump when the cached per-game tables change shape
 
 SOURCES: dict[str, dict] = {}
 
@@ -52,6 +52,7 @@ TEAM_FIX = {"OAK": "LV", "SD": "LAC", "STL": "LA", "LAR": "LA", "JAC": "JAX", "W
 PBP_COLS = [
     "game_id", "season", "week", "posteam", "defteam", "play_type",
     "epa", "success", "wp", "qb_dropback", "passer_player_id", "passer_player_name",
+    "qtr", "drive", "game_seconds_remaining", "half_seconds_remaining", "score_differential",
 ]
 
 
@@ -152,9 +153,22 @@ def _team_games_from_pbp(pbp: pd.DataFrame) -> pd.DataFrame:
     pass_eff = (
         comp[comp["qb_dropback"] == 1].groupby(keys)["epa"].mean().rename("pass_epa").reset_index()
     )
+    rush_eff = comp[comp["play_type"] == "run"].groupby(keys)["epa"].mean().rename("rush_epa").reset_index()
     plays = pbp.groupby(keys).size().rename("plays").reset_index()
-    out = eff.merge(pass_eff, on=keys, how="left").merge(plays, on=keys, how="left")
+    out = (eff.merge(pass_eff, on=keys, how="left").merge(rush_eff, on=keys, how="left")
+              .merge(plays, on=keys, how="left").merge(_neutral_pace(pbp, keys), on=keys, how="left"))
     return out.rename(columns={"posteam": "team", "defteam": "opp"})
+
+
+def _neutral_pace(pbp: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    """Seconds between consecutive offensive snaps within a drive, in neutral situations:
+    quarters 1-3, score within 7, outside the last two minutes of a half. Gaps over 60 s
+    (timeouts, reviews, injuries) and non-positive gaps are dropped."""
+    d = pbp.sort_values(["game_id", "drive", "game_seconds_remaining"], ascending=[True, True, False]).copy()
+    d["gap"] = d.groupby(["game_id", "drive"])["game_seconds_remaining"].shift(1) - d["game_seconds_remaining"]
+    n = d[(d["qtr"] <= 3) & (d["score_differential"].abs() <= 7) & (d["half_seconds_remaining"] > 120)
+          & (d["gap"] > 0) & (d["gap"] <= 60)]
+    return n.groupby(keys).agg(neutral_spp=("gap", "mean"), neutral_n=("gap", "size")).reset_index()
 
 
 def _qb_games_from_pbp(pbp: pd.DataFrame) -> pd.DataFrame:
