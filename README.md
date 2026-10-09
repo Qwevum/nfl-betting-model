@@ -38,12 +38,29 @@ python run.py validate                # out-of-sample validation (about 2 minute
 
 ## Your inputs (all optional)
 
+Every row names its game by `game_id` and `kickoff_utc`, never by team names.
+`python run.py templates` writes those rows for the next week into `templates/`.
+Rows for unknown games, or whose kickoff doesn't match the schedule (for
+example a rescheduled game), are rejected and listed in the output.
+
 | file | use |
 |---|---|
-| `odds_manual.csv` | prices from your sportsbook apps, with `retrieved_at`; required to get a plain **BET** |
-| `qb_overrides.csv` | a starting QB you have confirmed (inactives, team announcement) |
-| `weather_manual.csv` | wind/temperature forecast; the model won't bet an outdoor total without it |
-| `ODDS_API_KEY` env var | pulls every US book from the-odds-api.com (free tier) with per-book update times |
+| `odds_manual.csv` | quotes from your sportsbook apps, with `odds_time_utc` (ISO-8601 UTC) |
+| `qb_overrides.csv` | a starting QB you have confirmed for one game, with `confirmed_utc` |
+| `weather_manual.csv` | wind/temperature forecast with `forecast_utc`; required to bet an outdoor total |
+| `ODDS_API_KEY` env var | every US book from the-odds-api.com (free tier) with per-book update times |
+| `settings.toml` | overrides for `nflmodel/config.py`, e.g. `max_odds_age_minutes = 20` |
+
+Bookmaker quotes are validated **before** the best price is chosen. A quote is
+rejected if:
+* its timestamp is missing, naive (no timezone) or in the future
+* it is older than `max_odds_age_minutes` (default 30)
+* it was quoted at or after kickoff, or the run itself is at or after kickoff
+* its price, line or market/side is invalid
+
+Games that have started are skipped. `--now 2026-10-11T15:00:00Z` replays a run
+at a fixed time; such runs, and runs from uncommitted code, write to `reports/dev/`
+and are never logged.
 
 ## Data sources
 

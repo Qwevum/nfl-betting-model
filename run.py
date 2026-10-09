@@ -15,12 +15,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from nflmodel import decide, report, track, validate
+from nflmodel import decide, inputs, report, track, validate
+from nflmodel.config import load_settings
+from nflmodel.timeutil import fmt, kickoff_utc, now_utc, parse_utc
 from nflmodel.backtest import grade as grade_bet, profit
 from nflmodel.data import (FIRST_PBP_SEASON, SOURCES, load_games, load_injuries, load_team_games,
                            save_sources)
 from nflmodel.model import fit
-from nflmodel.odds import consensus_offers, gather_offers
+from nflmodel.odds import consensus_offers, gather_offers, validate_offers
 from nflmodel.report import table
 from nflmodel.ratings import build_features
 
@@ -38,78 +40,57 @@ def build(refresh: bool = True):
     tg, qg = load_team_games(list(range(FIRST_PBP_SEASON, current + 1)), refresh_current=refresh)
     print("Building ratings ...")
     feat, table_, qbr = build_features(games, tg, qg)
+    feat["kickoff_utc"] = [_kick(d, t) for d, t in zip(feat["gameday"], feat["gametime"])]
     return games, feat, table_, current, qbr
 
 
-# ---------------------------------------------------------------- user inputs
-
-def _read(name: str) -> pd.DataFrame:
-    path = ROOT / name
-    return pd.read_csv(path, comment="#") if path.exists() else pd.DataFrame()
-
-
-def apply_qb_overrides(rows: pd.DataFrame, games: pd.DataFrame, qbr) -> tuple[pd.DataFrame, dict]:
-    """qb_overrides.csv: team,qb_name,source - a starter you have confirmed."""
-    ov = _read("qb_overrides.csv")
-    if ov.empty:
-        return rows, {}
-    ids = {}
-    for side in ("home", "away"):
-        for n, i in zip(games[f"{side}_qb_name"], games[f"{side}_qb_id"]):
-            if isinstance(n, str) and isinstance(i, str):
-                ids[n] = i
-    rows = rows.copy()
-    done = {}
-    for r in ov.itertuples(index=False):
-        for side in ("home", "away"):
-            m = rows[f"{side}_team"] == r.team
-            if not m.any():
-                continue
-            qb_id = ids.get(r.qb_name)
-            rating = qbr.rating(qb_id)  # unknown QB -> prior for inexperienced QBs
-            base = rows.loc[m, f"{side}_qb_base"].fillna(rating)
-            rows.loc[m, f"{side}_qb_id"] = qb_id if qb_id else f"unknown:{r.qb_name}"
-            rows.loc[m, f"{side}_qb_name"] = r.qb_name
-            rows.loc[m, f"{side}_qb_rating"] = rating
-            rows.loc[m, f"{side}_qb_delta"] = rating - base
-            done[r.team] = r.qb_name + ("" if qb_id else " (no NFL dropbacks in data; rated as an inexperienced QB)")
-    rows["f_qb"] = rows["home_qb_delta"].fillna(0) - rows["away_qb_delta"].fillna(0)
-    return rows, done
-
-
-def apply_weather(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    w = _read("weather_manual.csv")
-    if w.empty:
-        return rows, {}
-    rows = rows.copy()
-    out = {}
-    for r in w.itertuples(index=False):
-        m = (rows["away_team"] == r.away) & (rows["home_team"] == r.home)
-        if m.any():
-            rows.loc[m, "t_wind"] = float(r.wind_mph)
-            out[(r.away, r.home)] = r._asdict()
-    return rows, out
+def _kick(gameday, gametime):
+    try:
+        return kickoff_utc(gameday, gametime)
+    except ValueError:
+        return pd.NaT
 
 
 # ---------------------------------------------------------------- core analysis
 
-def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: bool, min_edge: float,
-            refresh: bool):
-    """Fit on games before `cutoff`, price `day`, and build decisions with context."""
+def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: bool, settings,
+            refresh: bool, now: pd.Timestamp):
+    """Fit on games before `cutoff`, price `day`, and build decisions with context.
+
+    Live: bookmaker offers are validated (timestamp, freshness, pre-kickoff) before
+    any best-price selection; games already started are dropped.
+    """
     train = feat[feat["result"].notna() & (feat["gameday"] < cutoff) & (feat["season"] > FIRST_PBP_SEASON)]
     model = fit(train)
     coefs = model.pure.raw_coefs()
+    notes, rejected = [], pd.DataFrame()
 
     overrides, weather = {}, {}
     if live:
-        day, overrides = apply_qb_overrides(day, games, qbr)
-        day, weather = apply_weather(day)
+        started = day[day["kickoff_utc"].isna() | (day["kickoff_utc"] <= now)]
+        for g in started.itertuples(index=False):
+            notes.append(f"{g.game_id} skipped: kickoff {'unknown' if pd.isna(g.kickoff_utc) else fmt(g.kickoff_utc)} "
+                         f"is not after {fmt(now)}")
+        day = day.drop(started.index)
+        if day.empty:
+            return model, coefs, model.predict(day), pd.DataFrame(), {}, notes, rejected
+        overrides, n1 = inputs.load_qb_overrides(day, settings.kickoff_match_minutes)
+        weather, n2 = inputs.load_weather(day, settings.kickoff_match_minutes)
+        notes += n1 + n2
+        day = inputs.apply_qb_overrides(day, overrides, games, qbr)
+        day = inputs.apply_weather(day, weather)
     preds = model.predict(day)
 
     if live:
         inj = load_injuries(int(day["season"].iloc[0]), refresh=refresh)
         print("Gathering odds ...")
-        offers = gather_offers(day)
+        books, consensus, n3 = gather_offers(day, inputs.kickoff_map(day), settings)
+        notes += n3
+        valid, rejected = validate_offers(books, inputs.kickoff_map(day), now, settings)
+        if len(rejected):
+            notes.append(f"{len(rejected)} bookmaker quote(s) rejected before price selection "
+                         f"({rejected['reject_reason'].str.split(':').str[0].value_counts().to_dict()})")
+        offers = pd.concat([valid.drop(columns="odds_time_utc"), consensus], ignore_index=True)
     else:
         inj = pd.DataFrame()
         offers = consensus_offers(day)
@@ -120,16 +101,16 @@ def analyze(games, feat, qbr, day: pd.DataFrame, cutoff: pd.Timestamp, live: boo
             ctx = decide.build_context(g, inj, SOURCES, coefs, model.k_spread, overrides, weather)
         else:  # historical: only the rules that can be applied from data available then
             ctx = decide.GameContext()
-            if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= decide.GAP_POINTS:
+            if pd.notna(g.spread_line) and abs(g.model_margin - g.spread_line) >= settings.gap_points:
                 ctx.block["spread"].append("model vs market gap"); ctx.block["ml"].append("model vs market gap")
         contexts[g.game_id] = ctx
-        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, min_edge)
+        rows += decide.decide_game(model, g, offers[offers["game_id"] == g.game_id], ctx, settings.min_edge)
     rows = pd.DataFrame(rows)
     if len(rows):
         best = decide.best_per_market(rows)
         rows["is_best_side"] = rows.set_index(["game_id", "market", "side"]).index.isin(
             best.set_index(["game_id", "market", "side"]).index)
-    return model, coefs, preds, rows, contexts
+    return model, coefs, preds, rows, contexts, notes, rejected
 
 
 # ---------------------------------------------------------------- commands
@@ -144,29 +125,37 @@ def cmd_predict(args):
         raise SystemExit(f"No games found for {season} week {week}")
     live = wk["result"].isna().any()
     cutoff = wk["gameday"].min()
-    model, coefs, preds, rows, contexts = analyze(games, feat, qbr, wk, cutoff, live, args.min_edge,
-                                                  refresh=not args.no_refresh)
+    settings = load_settings(min_edge=args.min_edge, max_odds_age_minutes=args.max_odds_age)
+    now = parse_utc(args.now) if args.now else now_utc()
+    model, coefs, preds, rows, contexts, notes, rejected = analyze(
+        games, feat, qbr, wk, cutoff, live, settings, refresh=not args.no_refresh, now=now)
+    for n in notes:
+        print(f"  ! {n}")
     if rows.empty:
         raise SystemExit("No odds available for these games yet.")
     save_sources()
 
     best = rows[rows["is_best_side"]]
     print(f"\n=== {season} Week {week} ===  model {track.model_version()}  |  "
-          f"flag: EV > {args.min_edge:.0%} and robust to a 0.5-pt error\n")
+          f"flag: EV > {settings.min_edge:.0%} and robust to a 0.5-pt error\n")
     print(report.terminal_summary(best, preds))
     n_bet = (best["decision"] != "NO BET").sum()
     print(f"\n{n_bet} bet(s) of {len(best)} markets. Full reasoning per game in the report.")
 
     val = ROOT / "reports" / "validation_summary.md"
-    md = report.header(season, week, SOURCES, track.model_version(), model, args.min_edge,
+    md = report.header(season, week, SOURCES, track.model_version(), model, settings.min_edge,
                        val.read_text() if val.exists() else None)
     for g in preds.itertuples(index=False):
         md += "\n" + report.game_section(g, contexts[g.game_id], rows[rows["game_id"] == g.game_id], coefs, model)
-    out = ROOT / "reports" / f"{season}_week{week:02d}.md"
+    out = ROOT / "reports" / ("dev" if args.now or track.model_version().endswith("-modified") else "") \
+        / f"{season}_week{week:02d}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.parent.mkdir(exist_ok=True)
     out.write_text(md)
     print(f"Report: {out.relative_to(ROOT)}")
-    if live:
+    if live and (args.now or track.model_version().endswith("-modified")):
+        print("Not logged: simulated time (--now) or uncommitted model code.")
+    elif live:
         upcoming_ids = set(wk.loc[wk["result"].isna(), "game_id"])
         log = track.log_predictions(rows[rows["game_id"].isin(upcoming_ids)], preds)
         print(f"Logged {rows['game_id'].isin(upcoming_ids).sum()} predictions (bets and passes) to "
@@ -187,8 +176,12 @@ def cmd_recommend(args):
     if day.empty:
         raise SystemExit(f"No games between {start.date()} and {(end - pd.Timedelta(days=1)).date()}.")
     live = start >= today
-    model, coefs, preds, rows, contexts = analyze(games, feat, qbr, day, start, live, args.min_edge,
-                                                  refresh=not args.no_refresh)
+    settings = load_settings(min_edge=args.min_edge, max_odds_age_minutes=args.max_odds_age)
+    now = parse_utc(args.now) if args.now else now_utc()
+    model, coefs, preds, rows, contexts, notes, rejected = analyze(
+        games, feat, qbr, day, start, live, settings, refresh=not args.no_refresh, now=now)
+    for n in notes:
+        print(f"  ! {n}")
     if rows.empty:
         raise SystemExit("No odds available for these games yet.")
     markets = set(args.markets.split(","))
@@ -221,7 +214,7 @@ def cmd_recommend(args):
                                              f" - {(end - pd.Timedelta(days=1)).strftime('%a %b %d')}")
     print(f"\n{span}  |  {len(day)} games  |  "
           f"{'live odds' if live else 'historical closing lines, model fit on earlier games only'}  |  "
-          f"flag: EV > {args.min_edge:.0%}\n")
+          f"flag: EV > {settings.min_edge:.0%}\n")
     print(table(out, head, align))
     b = show[show["decision"] != "NO BET"]
     print(f"\n{len(b)} bet(s), {b['stake_units'].sum():.2f}u total stake (quarter Kelly, max "
@@ -233,7 +226,9 @@ def cmd_recommend(args):
     path.parent.mkdir(exist_ok=True)
     show.to_csv(path, index=False)
     print(f"Saved {path.relative_to(ROOT)}")
-    if live:
+    if live and (args.now or track.model_version().endswith("-modified")):
+        print("Not logged: simulated time (--now) or uncommitted model code.")
+    elif live:
         log = track.log_predictions(rows, preds)
         print(f"Logged {len(rows)} predictions to {log.relative_to(ROOT)}")
 
@@ -243,10 +238,11 @@ def cmd_validate(args):
     last = int(feat.loc[feat["result"].notna(), "season"].max())
     seasons = list(range(args.start, last + 1))
     print(f"Validating {seasons[0]}-{seasons[-1]} (each season predicted by a model fit on earlier ones) ...")
-    preds, bets = validate.run(feat, seasons, args.min_edge)
+    min_edge = load_settings(min_edge=args.min_edge).min_edge
+    preds, bets = validate.run(feat, seasons, min_edge)
     print("Ablation: same model without the QB-change feature ...")
     no_qb = [f for f in validate.FEATURES if f != "f_qb"]
-    preds_nq, _ = validate.run(feat, seasons, args.min_edge, features=no_qb, with_bets=False)
+    preds_nq, _ = validate.run(feat, seasons, min_edge, features=no_qb, with_bets=False)
 
     probs = validate.prob_table(preds)
     probs_nq = validate.prob_table(preds_nq).query("predictor == 'model'").assign(predictor="model without QB feature")
@@ -264,7 +260,7 @@ def cmd_validate(args):
     print(cal.round(3).to_string(index=False))
     print("\nMargin error by season (points):")
     print(mae.round(2).to_string(index=False))
-    print(f"\nBetting vs closing lines, decision rules as live (EV > {args.min_edge:.0%}, robust to 0.5 pt, "
+    print(f"\nBetting vs closing lines, decision rules as live (EV > {min_edge:.0%}, robust to 0.5 pt, "
           "no 4+ pt gaps), one side per market:")
     print(bt.to_string(index=False))
 
@@ -295,6 +291,17 @@ def cmd_ratings(args):
     print(table_.round(3).to_string(index=False))
 
 
+def cmd_templates(args):
+    _, feat, _, current, _ = build(refresh=not args.no_refresh)
+    season = args.season or current
+    upcoming = feat[(feat["season"] == season) & feat["result"].isna()]
+    week = args.week or int(upcoming["week"].min())
+    day = feat[(feat["season"] == season) & (feat["week"] == week)]
+    for p in inputs.write_templates(day, ROOT / "templates"):
+        print(f"wrote {p.relative_to(ROOT)}")
+    print("Copy the rows you need into odds_manual.csv / qb_overrides.csv / weather_manual.csv.")
+
+
 def cmd_grade(args):
     games = load_games(refresh=not args.no_refresh)
     df = track.grade_log(games)
@@ -316,13 +323,18 @@ def main():
     r.add_argument("--all", action="store_true", help="show both sides of every market")
     v = sub.add_parser("validate"); v.add_argument("--from", dest="start", type=int, default=2015)
     sub.add_parser("ratings"); sub.add_parser("grade")
+    t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
+    t.add_argument("--week", type=int); t.add_argument("--season", type=int)
     for s in sub.choices.values():
         s.add_argument("--no-refresh", action="store_true", help="use cached data, no downloads")
-        s.add_argument("--min-edge", type=float, default=decide.MIN_EDGE,
-                       help="minimum EV to bet (0.02 = 2%%)")
+        s.add_argument("--min-edge", type=float, default=None,
+                       help="minimum EV to bet (0.02 = 2%%); default from settings")
+        s.add_argument("--max-odds-age", type=float, default=None,
+                       help="reject bookmaker quotes older than this many minutes; default from settings")
+        s.add_argument("--now", help="evaluate as of this UTC time (ISO-8601 with Z), for reproducible runs")
     args = ap.parse_args()
     {"predict": cmd_predict, "recommend": cmd_recommend, "validate": cmd_validate,
-     "ratings": cmd_ratings, "grade": cmd_grade}[args.cmd](args)
+     "ratings": cmd_ratings, "grade": cmd_grade, "templates": cmd_templates}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -101,8 +101,10 @@ def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: fl
     for side, team, qb_id, qb_name, delta, rating in (
             ("away", g.away_team, g.away_qb_id, g.away_qb_name, g.away_qb_delta, g.away_qb_rating),
             ("home", g.home_team, g.home_qb_id, g.home_qb_name, g.home_qb_delta, g.home_qb_rating)):
-        if team in overrides:
-            c.assumptions.append(f"{team} starter set to {overrides[team]} by qb_overrides.csv (your input)")
+        ov = overrides.get((g.game_id, team))
+        if ov:
+            c.assumptions.append(f"{team} starter set to {ov['qb_name']} by qb_overrides.csv "
+                                 f"(source: {ov.get('source') or 'not given'}, confirmed {ov['confirmed_utc']})")
         if not isinstance(qb_id, str):
             c.missing.append(f"{team} projected starting QB not listed")
             for m in c.block:
@@ -113,10 +115,10 @@ def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: fl
         if status or practice:
             c.facts.append(f"{qb_name} week {week} injury report: status {status or 'none'}, "
                            f"practice: {practice or 'n/a'} {inj_tag}")
-        if status in UNSURE and team not in overrides:
+        if status in UNSURE and not ov:
             for m in c.block:
                 c.block[m].append(f"{team} projected starter {qb_name} is {status}")
-        elif status is None and practice and practice.startswith("Did Not") and team not in overrides:
+        elif status is None and practice and practice.startswith("Did Not") and not ov:
             c.missing.append(f"{qb_name} did not practice; game status not yet issued")
             for m in c.block:
                 c.block[m].append(f"{team} projected starter {qb_name} did not practice (status pending)")
@@ -148,11 +150,10 @@ def build_context(g, inj: pd.DataFrame, sources: dict, coefs: dict, k_spread: fl
                          "(the fair line is mostly the market line)")
 
     outdoor = roof not in ("dome", "closed")
-    key = (g.away_team, g.home_team)
-    if key in weather:
-        w = weather[key]
+    if g.game_id in weather:
+        w = weather[g.game_id]
         c.facts.append(f"Forecast wind {w['wind_mph']} mph, temp {w['temp_f']} F "
-                       f"[{w.get('source', 'weather_manual.csv')}, retrieved {w.get('retrieved_utc', '?')}]")
+                       f"[{w.get('source') or 'weather_manual.csv'}, forecast issued {w['forecast_utc']}]")
     elif outdoor:
         c.missing.append("Weather forecast (wind matters for totals) - "
                          + ("roof status not listed" if roof is None else "outdoor stadium"))

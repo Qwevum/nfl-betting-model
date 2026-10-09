@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 picks/recommend_*.csv
 logs/graded.csv
+templates/
+reports/dev/

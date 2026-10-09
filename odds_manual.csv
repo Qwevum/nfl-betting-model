@@ -1,10 +1,6 @@
-# Lines you copy from your own sportsbook apps. The model picks the best EV across all books.
+# Quotes copied from your sportsbook apps. Get game_id/kickoff_utc rows from `python run.py templates`.
 # market: spread | ml | total     side: home | away | over | under
-# point: spread from that side's view (e.g. -3.5), the total number for totals, blank for ml
-# retrieved_at: when you saw the price (e.g. 2026-10-11T11:05). Without it the price is
-#               treated as unverified and the decision stays "BET IF PRICE AVAILABLE".
-# Example rows (remove the leading # to use):
-# book,away,home,market,side,point,price,retrieved_at
-# draftkings,PHI,JAX,spread,away,+7,-105,2026-10-11T11:05
-# fanduel,PHI,JAX,ml,away,,+280,2026-10-11T11:05
-book,away,home,market,side,point,price,retrieved_at
+# point: spread from that side's view (e.g. -3.5), the total for totals, blank for ml
+# odds_time_utc: when you saw the price, ISO-8601 UTC, e.g. 2026-10-11T15:05:00Z (required;
+#   quotes older than max_odds_age_minutes, or at/after kickoff, are rejected)
+game_id,kickoff_utc,book,market,side,point,price,odds_time_utc
