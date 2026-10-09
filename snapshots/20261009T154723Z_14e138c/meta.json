@@ -1,0 +1,29 @@
+{
+  "injuries_retrieved_utc": "2026-10-09T15:47:23Z",
+  "inputs_read_utc": "2026-10-09T15:47:22Z",
+  "model_version": "14e138c",
+  "odds_collected_utc": "2026-10-09T15:47:23Z",
+  "prediction_completed_utc": "2026-10-09T15:47:23Z",
+  "reprice": {
+    "completed_utc": "2026-10-09T15:47:23Z",
+    "expired_quotes": 0,
+    "repriced": 0,
+    "stable": true
+  },
+  "run_started_utc": "2026-10-09T15:47:19Z",
+  "settings": {
+    "clock_skew_minutes": 2.0,
+    "gap_points": 4.0,
+    "horizon_minutes": 60.0,
+    "horizon_tolerance_minutes": 15.0,
+    "kelly_fraction": 0.25,
+    "kickoff_match_minutes": 10.0,
+    "max_odds_age_minutes": 30.0,
+    "max_stake_units": 2.0,
+    "min_edge": 0.02,
+    "min_reference_books": 2,
+    "qb_confirm_max_age_minutes": 2880,
+    "weather_max_age_minutes": 720,
+    "weather_valid_window_minutes": 180
+  }
+}

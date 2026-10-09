@@ -1,0 +1,6 @@
+# Forecasts for outdoor games. A valid forecast ONLY unlocks betting outdoor totals:
+# wind and temperature are not model features (see README, "Weather").
+# forecast_utc: when the provider issued the forecast; retrieved_utc: when you fetched it;
+# valid_for_utc: the time the forecast is for (must be within 3 h of kickoff by default).
+# All times ISO-8601 UTC. wind_mph must be >= 0; temp_f in Fahrenheit. source is required.
+game_id,kickoff_utc,wind_mph,temp_f,source,forecast_utc,retrieved_utc,valid_for_utc

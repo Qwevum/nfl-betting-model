@@ -1,0 +1,5 @@
+# Starting QB you have confirmed (inactives list, team announcement) for one specific game.
+# qb_name must match a name in the nflverse schedule; source is required; confirmed_utc is
+# when the confirmation was published (ISO-8601 UTC). Confirmations older than
+# qb_confirm_max_age_minutes (default 48 h) at decision time, or from the future, are rejected.
+game_id,kickoff_utc,team,qb_name,source,confirmed_utc
