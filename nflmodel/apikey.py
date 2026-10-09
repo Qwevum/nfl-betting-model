@@ -20,7 +20,7 @@ NAME = "ODDS_API_KEY"
 def _from_env_file(path: Path) -> str | None:
     if not path.exists():
         return None
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
