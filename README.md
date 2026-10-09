@@ -10,7 +10,7 @@ logged before kickoff and graded afterwards.
 
 ```bash
 pip install -r requirements.txt       # requires Python 3.11+ (uses tomllib)
-python -m unittest discover tests     # 58 regression tests
+python -m unittest discover tests     # regression tests
 ```
 
 ## Weekly workflow
@@ -25,7 +25,23 @@ python run.py coverage --season 2026 --weeks 5-8   # which slate games have hori
 python run.py grade --season 2026 --weeks 5-8      # forecasts, recommendations and wagers, graded separately
 python run.py verify-log              # integrity check of all hash-chained logs
 python run.py validate                # out-of-sample validation (about 6 minutes)
+python run.py compare-models          # legacy vs model vs market-only probabilities, dev seasons
 ```
+
+**Latest report: [reports/LATEST.md](reports/LATEST.md).** Old pick files are kept in
+`picks/archive/` and are not current.
+
+Every report starts with three sections:
+* **Actionable recommendations**: only sides meeting *every* requirement. Often empty;
+  that is a valid result.
+* **Watchlist (conditional, NOT recommendations)**: the closest candidates, why
+  each fails, and the worst price at the *same line* that would clear the
+  threshold *if the probability estimate stays the same*. A later quote at that
+  price still needs a fresh run.
+* **Why these decisions**: each side is categorised as negative estimated value,
+  small positive value below threshold, blocked by rule, or insufficient
+  information. Then come the overlapping reasons, a sequential filter funnel and
+  the EV distribution by market.
 
 `predict` writes `reports/<season>_week<NN>.md`, with one section per game:
 
@@ -33,10 +49,13 @@ python run.py validate                # out-of-sample validation (about 6 minute
   official injury report (or that game statuses are not issued yet), each tagged
   with its source and retrieval time.
 * **Model estimate**: market line, the model's own line, the calibrated fair
-  line, win probability, and the inputs that moved the model's line most.
-* **Per market and side**: best price found, implied probability, the market's
-  no-vig probability, the model's probability, EV, EV if the line is 0.5 pt worse,
-  EV using the market alone, and the decision.
+  line, the home win probability (the same final probability as the moneyline
+  rows, next to the raw market), and the inputs that moved the model's line most.
+* **Per market and side**: best price found, implied (break-even) probability, and
+  three separately labelled probabilities: the **raw market** (no-vig, without the
+  priced book), the **calibrated market-only** probability, and the **final**
+  probability used for EV. Then EV, EV if the line is 0.5 pt worse, EV at the raw
+  market, and the status.
 * **Decisions** with reasons, minimum acceptable price, sensitivity, and why the
   bet could be wrong.
 * **Assumptions** and **missing or stale information**, listed separately.
@@ -141,15 +160,24 @@ travel distance, confirmed inactives, and timestamped book prices unless you sup
    QB is not counted twice.
 3. **Model line** (`nflmodel/model.py`). Ridge regression on those features gives
    the model's own margin and total. A second regression adds the market line.
-4. **Market-anchored probability**. The estimate starts from the market's
-   no-vig probability: the live multi-book reference built without the offer's
-   own book, or the untimed nflverse consensus as a labelled fallback. A calibration fit only on past seasons' out-of-sample
-   predictions, `sigmoid(a + b·logit(market) + c·(model − line))`, decides how far
-   the model may move it. Currently `c` is about 0 for spreads, so the model adds
-   nothing there; it is small and positive for totals and moneylines.
-5. **Other lines and prices**. A key-number outcome distribution (3, 7, 10, ...
-   happen more than a bell curve says) converts the probability to other lines,
-   including push chances. This is what makes +7.5 vs +7 worth paying for.
+4. **Market-anchored probability** (`probability_model = "model"`, the default).
+   The market reference comes first: the live multi-book reference built without
+   the offer's own book, or the untimed nflverse consensus as a labelled fallback.
+   It gives an implied mean margin/total. A key-number outcome distribution (3, 7,
+   10, ... happen more than a bell curve says) turns that mean into the market's
+   probability at the **exact line being priced**, with push chances. This is what
+   makes +7.5 vs +7 worth paying for. The model then moves it by
+   `sigmoid(logit(market) + c·edge)`:
+   * the market's log-odds keep weight 1, with no intercept;
+   * `edge` is the blend's margin/total minus the reference line, with the blend
+     recomputed at the line built without the priced book;
+   * `c` (the value of one point of edge) is fit only on past seasons'
+     out-of-sample predictions. It is about 0 for spreads and totals, and about
+     0.03 per point for moneylines.
+5. **Comparison arms.** `probability_model = "market"` uses the reference alone
+   (pure price shopping). `"legacy"` is the previous calibration
+   `sigmoid(a + b·logit(market) + c·edge)` with a free intercept and slope; it is
+   kept only as a baseline (see "Probability audit" below).
 6. **EV** = `p_win × (decimal − 1) − p_lose` at the actual price; pushes return the stake.
 
 ## Bet / no-bet rules (`nflmodel/decide.py`)
@@ -176,6 +204,26 @@ There are three passing tiers:
 
 Stakes are `kelly_fraction` × full Kelly (default 0.25), capped at `max_stake_units` (default 2;
 1u = 1% of bankroll). Every report prints the settings it actually used.
+
+**Your sportsbooks.** In `settings.toml`, set `actionable_books = "draftkings,fanduel"`
+(Odds API bookmaker keys). Every book still feeds the market references, but a
+bet is chosen only among your books. A side whose best price is only at other
+books is NO BET ("best price only at books you don't use"). If unset, every book
+counts as actionable and the report says so. `check-live` shows each game's lines
+and prices across books, marking reference-only books.
+
+## Probability audit (2026-10, details in docs/CHANGES.md §20)
+
+* The legacy calibration moved probabilities 1.5–2.4 points from the market on
+  average (development seasons). This did not significantly improve log loss.
+* In live use it was applied at the stale consensus line. A 1.5-point line move
+  created about 6 points of spurious probability in the regression test.
+* The shared model inputs (the blend's market line) included the priced book's
+  own quote.
+* All three are fixed. On 2015–2021, the corrected model's log loss is not
+  significantly different from legacy on any target
+  ([reports/probability_models.md](reports/probability_models.md)). Bet counts
+  and historical ROI were reported but **not** used to decide.
 
 ## Validation (`python run.py validate`, full tables in `reports/validation.md`)
 

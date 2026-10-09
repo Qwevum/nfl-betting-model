@@ -326,6 +326,7 @@ def report(g: dict, settings, slate_desc: str = "games in forecast history") -> 
             w, l_, p = (t["result"] == "W").sum(), (t["result"] == "L").sum(), (t["result"] == "P").sum()
             print(f"   {tier:11s}: {w}-{l_}-{p}, {t['flat_units'].sum():+.2f}u flat, "
                   f"avg CLV {t['clv'].mean():+.2f} ({pending} pending)")
+        print_arms(fc, settings)
     led = g.get("ledger")
     print("\n3) ACTUAL WAGERS (ledger)")
     if led is None or led.empty:
@@ -338,6 +339,39 @@ def report(g: dict, settings, slate_desc: str = "games in forecast history") -> 
         print(f"   {w}-{l_}-{p}, staked {s['stake_units'].sum():.2f}u, profit {s['units'].sum():+.2f}u "
               f"(ROI {s['units'].sum() / s['stake_units'].sum():+.1%}), max drawdown "
               f"{metrics.max_drawdown(s['units']):.2f}u, avg CLV {s['clv'].mean():+.2f}")
+
+
+def arm_table(fc: pd.DataFrame, settings) -> pd.DataFrame:
+    """Prospective arms on the same eligible runs and rows (hypothetical flat 1u, NOT wagers):
+      price shopping (market only): raw ex-book market EV above the threshold, at a timestamped
+                                    quote with a live reference (the same execution requirements)
+      model-assisted:               decision BET
+    Records written before ev_raw_market existed are not counted."""
+    if fc is None or fc.empty or "ev_raw_market" not in fc:
+        return pd.DataFrame()
+    f = fc.dropna(subset=["ev_raw_market"])
+    live = f["reference_live"].fillna(False).astype(bool) & f["price_source"].isin(["odds_api", "manual"])
+    arms = {"price shopping (market only)": f[live & (f["ev_raw_market"] > settings.min_edge)],
+            "model-assisted (BET)": f[f["decision"] == "BET"]}
+    rows = []
+    for name, a in arms.items():
+        done = a[a["result"].isin(["W", "L", "P"])]
+        rows.append({"arm": name, "sides flagged": len(a), "graded": len(done),
+                     "W-L-P": f"{(done['result'] == 'W').sum()}-{(done['result'] == 'L').sum()}-"
+                              f"{(done['result'] == 'P').sum()}",
+                     "flat units": float(done["flat_units"].sum()) if len(done) else 0.0,
+                     "avg CLV": float(done["clv"].mean()) if len(done) else np.nan})
+    return pd.DataFrame(rows)
+
+
+def print_arms(fc: pd.DataFrame, settings) -> None:
+    t = arm_table(fc, settings)
+    print("\n   Arms on identical eligible rows (hypothetical flat 1u, NOT wagers):")
+    if t.empty:
+        print("   no forecasts with the raw-market EV field yet (recorded from model version 2026-10 on)")
+        return
+    print("   " + t.round(3).to_string(index=False).replace("\n", "\n   "))
+    print("   ! small samples are noise; neither more flags nor a higher ROI alone shows an improvement")
 
 
 def import_legacy(path: Path = LEGACY_LOG) -> int:

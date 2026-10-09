@@ -880,3 +880,191 @@ The suite passes: 118 tests.
 **Verification:** new tests for key lookup order, `.env` parsing, redaction,
 the regions setting and the request URL. The key was not used from the
 development sandbox: its network policy blocks `api.the-odds-api.com`.
+
+## 20. Why week 5 had no bets; probability audit; watchlist
+
+### 20.1 The run that was investigated
+* `logs/forecasts.jsonl`, run `20261009T154723Z_14e138c`: commit `14e138c`,
+  completed 2026-10-09T15:47:23Z.
+* Inputs in `snapshots/20261009T154723Z_14e138c/`; report `reports/2026_week05.md`.
+* 14 games, 42 markets, 84 sides, all NO BET. TB @ DAL had already been played.
+* **Reproduced exactly**: rerunning that commit on the cached inputs at the same
+  clock gives identical prices, market probabilities, model probabilities and EV
+  for all 84 sides. The new code in `legacy` mode reproduces them exactly too.
+
+**EV at the best available price (all 84 sides):**
+
+| market | min | median | max | > 0 | > 2% |
+|---|---|---|---|---|---|
+| moneyline | −11.1% | −4.1% | −0.1% | 0 | 0 |
+| spread | −8.2% | −4.3% | +0.3% | 2 | 0 |
+| total | −8.8% | −4.4% | +0.2% | 2 | 0 |
+
+**Overlapping reasons** (best side per market, 42; a side can have several):
+
+| reason | sides |
+|---|---|
+| EV ≤ 0 | 38 |
+| 0 < EV ≤ 2% | 4 |
+| no timestamped bookmaker quote | 42 |
+| no live reference without the book | 42 |
+| starter not confirmed | 42 |
+| no weather forecast (outdoor total) | 11 |
+| model vs market gap rule | 1 |
+
+**Sequential filter** (best sides): 42 candidates → **0 with EV above 2%** (38
+removed at EV > 0, 4 at the threshold). Nothing reached the later stages.
+
+**Cause: prices first, then data coverage.**
+* The only prices were the untimed nflverse consensus, one per side, with about
+  4.3–4.7% overround. Against its own no-vig probability, a single price always
+  has EV of about minus the overround. The median of −4.4% is exactly that.
+* A bet therefore needs either the model to disagree with the market by more
+  than the vig plus 2%, or a better price at another book.
+* The model barely disagrees. Its edge is about 0.2 points, and the
+  out-of-sample value of one point of edge is about 0 for spreads and totals.
+* The 4 sides with EV > 0 (max +0.3%) came from the calibration artifact below,
+  not from the model.
+* Even with enough EV, every side would still have been conditional: no
+  timestamped quotes, no live references, and starters unconfirmed on a Friday.
+  So data coverage blocked any executable bet regardless.
+
+### 20.2 Audit of the probability calculation
+Traced for BAL @ ATL (consensus ATL −3 −120 / BAL +3 +100, total 43.5
+o−115/u−105, ML ATL −170 / BAL +142):
+
+| bet | raw market (no-vig) | legacy calibrated market-only | legacy final | EV legacy | corrected final | EV corrected |
+|---|---|---|---|---|---|---|
+| BAL ML +142 | 39.6% | 40.4% | 40.6% | −1.9% | 39.8% | −3.6% |
+| BAL +3 +100 | 47.8% | 50.2% | 50.2% | +0.3% | 47.8% | −4.0% |
+| Under 43.5 −105 | 48.9% | 50.9% | 50.9% | −0.6% | 48.8% | −4.7% |
+
+Other values in this trace:
+* The model's own line is BAL −0.5, and its blend is 2.76 (edge −0.24 pt vs
+  ATL −3). The model's own total is 46.3, and its blend is 43.2.
+* Legacy calibration `[a, b, c]` at this cutoff: spread `[−0.038, 0.357, −0.002]`,
+  total `[−0.054, 0.401, 0.004]`, ml `[−0.048, 1.041, 0.033]`.
+* Offset `c` values: spread −0.003, total −0.016, ml 0.034 per point.
+
+**Defects found:**
+1. **The calibration creates differences the evidence doesn't support.** The
+   free intercept and a slope of 0.36–0.40 on the market's log-odds shrink every
+   spread and total probability toward 50%. For BAL +3, the market's −120/+100
+   pair says 47.8%; legacy says 50.2%, so the price information is erased.
+   * On development seasons 2015–2021, the shift averaged 2.4 points (covers),
+     1.8 (overs) and 1.5 (winners).
+   * The paired log-loss differences vs the raw market were not significant
+     (covers −0.00018, CI ±0.0027; overs +0.00079, CI −0.0012 to +0.0029).
+   * The spread slope ranges from −0.67 to +0.09 across those seasons.
+   * Shifts of 1.5–2.4 points are as large as the EV threshold, so they decided
+     which sides looked close.
+2. **Out-of-range use in live runs.** The legacy path takes the market
+   probability at the stale nflverse consensus line and shrinks it, then moves to
+   the priced line with the model's own distribution. When live books have moved
+   off the consensus line, that probability is far from 50% and the shrink
+   manufactures an edge. In the regression test the move was 1.5 points, from −3
+   to −4.5. The live market says 53.3%, legacy says 47.3%, and a fairly priced
+   opposite side looks like about +11% EV.
+3. **Leave-one-book-out broke in shared inputs.** `price_slate` wrote the
+   all-books reference line, which includes the priced book, into
+   `spread_line`/`total_line`. The blend regression takes that line as an input,
+   so the priced book's own quote reached its edge.
+4. **Report inconsistency.** The headline win probability used the ratings-only
+   `win_prob(fair_margin)`. The moneyline table used the market-anchored
+   probability.
+
+**Fixes (`probability_model = "model"`, default):**
+* The probability at the exact line is the ex-book reference's implied mean
+  pushed through the key-number distribution. It equals the raw market.
+* The model moves it by `sigmoid(logit(p) + c·edge)`, where only `c` is fit
+  (offset logistic, out of sample).
+* The edge is measured against the ex-book reference line, with the blend
+  recomputed at that line. Slate lines are no longer overwritten; the all-books
+  line is kept only as `live_spread_line`/`live_total_line` for display.
+* Every row carries `market_prob` (raw), `market_cal_prob` (calibrated
+  market-only), `model_prob` (final), `ev_raw_market` and `probability_model`.
+* The headline uses the moneyline rows' final probability and shows the raw
+  market next to it.
+* `legacy` and `market` remain selectable as comparison arms.
+
+**Before/after on identical week 5 inputs:**
+* Prices and raw market probabilities are unchanged, so every difference comes
+  from the corrected calculation, not new prices or a different model fit.
+* The mean |Δ final probability| is 1.0 points (ML), 1.4 (spread) and 1.5
+  (total).
+* Old best sides sat 1.3–1.6 points above the raw market; now 0.0–0.3 points.
+* The maximum EV went from +0.3% to −2.2%. Sides with EV > 0 went from 4 to 0.
+  Sides above 2% stayed at 0 in both.
+
+### 20.3 Development comparison (`run.py compare-models`, protocol in EXPERIMENTS.md "CAL")
+Run once at commit `0aa741b`; recorded in `logs/experiments.jsonl`; full tables
+in `reports/probability_models.md`.
+* **Log loss.** The corrected model minus legacy: winner −0.00016 (CI −0.0013 to
+  +0.0010), covers +0.00028 (−0.0024 to +0.0028), overs −0.00060 (−0.0024 to
+  +0.0011). None is significant, so the decision rule keeps `model`.
+* **Calibration (ECE).** Legacy is lower on covers (0.008 vs 0.020) and overs
+  (0.001 vs 0.011): its intercept fits home-cover and over rates of 48.2% and
+  48.6%. These rates are within about 1.6 standard errors of 50%, and the gain
+  does not show up in log loss.
+* **Bets at closing consensus prices.**
+  * Legacy: 1,148 bets (0.61 per game), ROI +2.4% (CI −4.0% to +8.8%).
+  * Model: 76 bets, +1.1% (CI −26% to +30%).
+  * Market-only: 0 bets, by construction, since there is one price per side.
+  * Legacy's bets come mainly from the calibration shifts in defect 1. **More
+    bets or a higher historical ROI are not evidence of an improvement**, and
+    none of these ROIs is distinguishable from 0.
+* The holdout (2022+) was not used.
+
+### 20.4 Making NO BET useful
+* `diagnose.py` assigns each side one category (actionable / negative estimated
+  value / small positive value below threshold / blocked by rule / insufficient
+  information) and computes the overlapping reasons, the sequential funnel and
+  the EV distribution. Its last stage always equals the number of BET rows.
+* Reports and the terminal now show an **actionable table** (BET only) and a
+  separate **watchlist**: the closest candidates, why each fails, and the worst
+  price at the same line that clears the threshold, conditional on the current
+  estimate. A watchlist entry is never labelled a bet. Statuses read "not a
+  bet: <category>".
+* `actionable_books` splits reference books from betting venues.
+* `check-live` compares lines and prices across books.
+* `grade` reports the price-shopping (market-only) arm and the model-assisted
+  arm on identical eligible rows, from records carrying `ev_raw_market`.
+* Obsolete `picks/` files moved unchanged to `picks/archive/`.
+  `reports/LATEST.md` links the latest weekly report.
+
+### 20.5 Live data
+* `ODDS_API_KEY` is configured (via `.env`; value never shown).
+* This sandbox's network policy still blocks `api.the-odds-api.com` (proxy 403),
+  so no live quotes were fetched. No live opportunity detection is claimed, and
+  no fresh report was produced.
+* No historical timestamped multi-book data exists here, so price shopping
+  cannot be evaluated historically. Prospective collection is `run.py collect`
+  (run it by hand; nothing is scheduled) plus the per-run snapshots.
+
+### 20.6 Highest-priority next experiment
+**Prospective price-shopping test.** For several weeks, with the live feed and
+your `actionable_books`:
+1. Run `collect` and `predict` by hand inside the 60–75 minute horizon window.
+2. Then grade both arms on identical rows: market-only and model-assisted.
+3. Primary metric: closing-line value against the ex-book closing reference. It
+   needs far fewer bets than ROI to separate from 0.
+4. Write the success criterion (mean CLV > 0 with a game-clustered 95% CI
+   excluding 0) into EXPERIMENTS.md before the first graded week.
+
+Until then the evidence supports no model edge beyond the market. Any real
+opportunity will come from prices: a book that lags the others by more than the
+threshold.
+
+**Verification:** 20 new regression tests (`test_probability_audit.py`,
+`test_diagnose.py`), covering:
+* no artificial edge at fair prices, at the reference line and at other lines;
+* legacy showing the defect;
+* the priced book's own quotes and line never moving its probability;
+* the blend recomputed at the ex-book line;
+* slate lines not overwritten;
+* raw, calibrated and final probabilities separated;
+* the headline equal to the moneyline rows;
+* actionable vs reference-only books;
+* offset-fit recovery;
+* categories, funnel = BET count, overlap, watchlist never containing a bet;
+* book comparison and the prospective arm table.
