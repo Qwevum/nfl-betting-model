@@ -921,6 +921,83 @@ def cmd_clv_backtest(args):
     print(f"\nReport {out.relative_to(ROOT)}")
 
 
+def cmd_open_line(args):
+    """OL1 (docs/EXPERIMENTS.md): bet the opening spread toward the model. Historical only."""
+    import hashlib
+    from nflmodel import experiment, histlines, openline as ol
+    from nflmodel.validate import to_markdown
+    version = _require_commit()
+    path = histlines.find_file()
+    if path is None:
+        print(HIST_LINES_HELP)
+        return
+    games, feat, _, _, _ = build(refresh=not args.no_refresh)
+    lines, rep = histlines.load(path, games)
+    last = int(feat.loc[feat["result"].notna(), "season"].max())
+    past = [r for r in experiment.history() if r.get("group") == "OL1"]
+    if args.holdout:
+        if any(r["period"] == "holdout" for r in past):
+            raise SystemExit("OL1 was already evaluated on the holdout; the protocol allows one run.")
+        dev = [r for r in past if r["period"] == "development" and r["passed"]]
+        if not dev:
+            raise SystemExit("OL1 has not passed the development criteria; holdout not allowed.")
+        T, seasons, period = float(dev[-1]["threshold"]), list(range(ol.HOLDOUT_FIRST, last + 1)), "holdout"
+    else:
+        T, seasons, period = None, ol.DEV, "development"
+    rows, models = ol.season_rows(feat, lines, list(range(2014, seasons[-1] + 1)))
+    moves = ol.move_params(rows, seasons)
+    test = rows[rows["season"].isin(seasons)]
+    by_T = {th: ol.summarize(ol.bets(test, th, moves, models)) for th in ol.THRESHOLDS}
+    if T is None:
+        T = ol.choose_threshold(by_T)
+    if T is None:
+        raise SystemExit("no threshold has the minimum number of bets")
+    b = ol.bets(test, T, moves, models)
+    s = by_T[T]
+    if period == "development":
+        passed = bool(s["roi_110_lo"] > 0)
+        verdict = (f"T={T:g}: ROI at -110 {s['roi_110']:+.1%} (95% CI {s['roi_110_lo']:+.1%} to "
+                   f"{s['roi_110_hi']:+.1%}) - " + ("PASSES (CI above 0)" if passed else "fails (CI includes 0)"))
+    else:
+        passed = bool(s["roi_110"] > 0)
+        verdict = (f"T={T:g}: holdout ROI at -110 {s['roi_110']:+.1%} (95% CI {s['roi_110_lo']:+.1%} to "
+                   f"{s['roi_110_hi']:+.1%}) - " + ("confirms" if passed else "does not confirm"))
+    tab = pd.DataFrame([{"T": th, **{k: v.get(k) for k in ("bets", "W", "L", "P", "cover", "cover_lo", "cover_hi",
+                                                              "pred_cover", "roi_110", "roi_110_lo", "roi_110_hi",
+                                                              "roi_105", "roi_105_lo", "roi_105_hi", "roi_open",
+                                                              "clv_points", "clv_points_lo", "clv_points_hi",
+                                                              "mean_exp_move")}}
+                        for th, v in by_T.items()])
+    brk = ol.breakdown(b)
+    pct = {c: "{:.1%}" for c in ("cover", "cover_lo", "cover_hi", "pred_cover")}
+    pct.update({c: "{:+.1%}" for c in ("roi_110", "roi_110_lo", "roi_110_hi", "roi_105", "roi_105_lo", "roi_105_hi",
+                                         "roi_open")})
+    pct.update({c: "{:+.2f}" for c in ("clv_points", "clv_points_lo", "clv_points_hi", "mean_exp_move")})
+    md = [f"# OL1: bet the opening spread toward the model ({period}, seasons {seasons[0]}-{seasons[-1]})", "",
+          f"Protocol: docs/EXPERIMENTS.md, section OL1. Model `{version}`. **Historical only: nothing changes live "
+          "predictions or decisions.**", "", f"> **Timing flag.** {ol.OPEN_TIMING_FLAG}", "",
+          f"Data: `{rep['file']}`, {rep['matched']} of {rep['rows']} rows matched; games with an opening line in "
+          f"these seasons: {len(test)}. Expected move a + b*g fit on earlier seasons only: "
+          + ", ".join(f"{k}: a={a:+.2f}, b={bb:.3f}" for k, (a, bb) in sorted(moves.items())) + ".", "",
+          "## Thresholds (|own line - open| >= T); break-even 52.4% at -110, 51.2% at -105", "",
+          to_markdown(tab, pct), "",
+          f"**{'Chosen' if period == 'development' else 'Pre-chosen'} T = {T:g}.** {verdict}.", "",
+          f"## Breakdown at T = {T:g} (descriptive)", "",
+          "`pred_cover` = mean predicted P(cover | no push) from the expected move through the key-number margin "
+          "distribution (expected close treated as fair); `cover` = actual.", "",
+          to_markdown(brk, pct), ""]
+    out = ROOT / "reports" / f"open_line_experiment_{'holdout' if args.holdout else 'dev'}.md"
+    out.write_text("\n".join(md) + "\n", encoding="utf-8")
+    store.append(experiment.LOG, "experiment", [{
+        "group": "OL1", "period": period, "seasons": seasons, "threshold": T, "passed": passed,
+        "verdict": verdict, "by_threshold": {str(k): v for k, v in by_T.items()},
+        "breakdown": brk.to_dict("records"), "moves": {str(k): list(v) for k, v in moves.items()},
+        "timing_flag": ol.OPEN_TIMING_FLAG, "model_version": version,
+        "protocol_sha256": hashlib.sha256(experiment.PROTOCOL.read_bytes()).hexdigest()}])
+    print("\n".join(md))
+    print(f"\nReport {out.relative_to(ROOT)}; recorded in logs/experiments.jsonl")
+
+
 def cmd_check_live(args):
     """Diagnose the live bookmaker feed. Prints statistics only; writes nothing."""
     from nflmodel import apikey, livecheck
@@ -1141,6 +1218,8 @@ def main():
     vf.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
     vf.add_argument("--replicates", type=int, help="bootstrap replicates (default: uncertainty_replicates)")
     vf.add_argument("--workers", type=int, default=0, help="parallel processes (default: automatic)")
+    olp = sub.add_parser("open-line", help="OL1: bet the opening spread toward the model (historical experiment)")
+    olp.add_argument("--holdout", action="store_true", help="the one-time holdout run (only after a dev pass)")
     cb = sub.add_parser("clv-backtest", help="opening-line / closing-line-value backtest (needs data/historical_lines.*)")
     cb.add_argument("--seasons", default="2015-2021", help="test seasons, e.g. 2015-2021 (default: development)")
     t = sub.add_parser("templates", help="write input templates (game_id, kickoff_utc) for a week")
@@ -1163,7 +1242,8 @@ def main():
      "collect": cmd_collect, "experiment": cmd_experiment, "check-live": cmd_check_live,
      "compare-models": cmd_compare_models,
      "coverage": cmd_coverage, "simulate-intervals": cmd_simulate_intervals,
-     "validate-forecasts": cmd_validate_forecasts, "clv-backtest": cmd_clv_backtest}[args.cmd](args)
+     "validate-forecasts": cmd_validate_forecasts, "clv-backtest": cmd_clv_backtest,
+     "open-line": cmd_open_line}[args.cmd](args)
 
 
 if __name__ == "__main__":

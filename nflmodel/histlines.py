@@ -47,6 +47,7 @@ ROLES = {
     "away_line_odds_close": [r"^awaylineoddsclos(e|ing)$"],
     "total_open": [r"^totalscoreopen(ing)?$", r"^totalopen(ing)?$"],
     "total_close": [r"^totalscoreclos(e|ing)$", r"^totalclos(e|ing)$"],
+    "notes": [r"^notes?$", r"^comments?$"],
 }
 REQUIRED = ("date", "home_team", "away_team", "home_line_open", "home_line_close")
 
@@ -189,7 +190,7 @@ def load(path: Path | None = None, games: pd.DataFrame | None = None, mapping: d
     df = pd.DataFrame({role: raw[col] for role, col in cols.items()})
     df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=False)
     for c in df.columns:
-        if c not in ("date", "home_team", "away_team"):
+        if c not in ("date", "home_team", "away_team", "notes"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["date"])
     df["season"] = df["date"].map(season_of)
@@ -254,9 +255,11 @@ def load(path: Path | None = None, games: pd.DataFrame | None = None, mapping: d
         for c in odds_cols:
             lines[c] = lines[c].map(decimal_to_american)
     gap = (lines["close_line"] - lines["nfl_close"]).abs()
+    if "notes" not in lines:
+        lines["notes"] = None
     out = lines[["game_id", "season", "open_line", "close_line", "home_line_odds_open", "away_line_odds_open",
                  "home_line_odds_close", "away_line_odds_close", "total_open", "total_close", "swapped",
-                 "nfl_close"]].drop_duplicates("game_id")
+                 "nfl_close", "notes"]].drop_duplicates("game_id")
     report = {"file": str(path.name), "rows": int(len(df)), "matched": int(len(out)), "unmatched": unmatched,
               "mapping": cols, "sign_convention": conv,
               "median |close - nflverse close|": float(gap.median()) if gap.notna().any() else None,
