@@ -109,3 +109,54 @@ These are reported for the chosen scheme, with baselines on identical games:
 The chosen method's real-data metrics are run once on 2022 onward and appended
 here. Nothing is re-tuned afterwards. Better-looking holdout numbers would not
 establish an improvement, and worse ones are reported as they are.
+
+
+## Results (appended 2026-10-09; the protocol above is unchanged)
+
+Recorded in `logs/experiments.jsonl` (group `UNC`). Reports:
+`reports/uncertainty_simulation.md`, `reports/forecast_validation_dev.md`,
+`reports/forecast_validation_holdout.md`.
+
+### Scheme selection (simulation)
+
+Truth = the point model on 2011–2020, forecasting the real 2021 games, with 60
+simulated histories and 50 replicates per scheme. The dependence estimated from
+real residuals is small: the team-season SD is about 0, and the season home-field
+SD is 0.14 points. The market already absorbs team strength.
+
+| scheme | SD ratio (pooled) | 90% coverage of E[estimate] | 90% coverage of truth |
+|---|---|---|---|
+| game | 1.22 | 0.97 | 0.93 |
+| week4 | 1.19 | 0.96 | 0.92 |
+| **season (selected)** | **1.07** | **0.91** | **0.87** |
+| season*week4 | 1.79 | 0.99 | 0.98 |
+
+* **Selected scheme:** `season`. Its SD ratio, 1.07, is the closest to 1 among the
+  schemes at or above 0.9, as the pre-registered rule requires.
+* **Bias:** coverage of the truth is a few points lower than coverage of the
+  estimator's expectation. The estimator has a small bias, from ridge shrinkage and
+  calibration, and the bootstrap does not correct it.
+* **Stress scenario** (sensitivity only; team and season shocks of 1–2 points): every
+  scheme keeps an SD ratio of at least 1.06. `season` reaches 0.92 coverage of the
+  expectation but only 0.77 of the truth, because bias grows with dependence.
+
+### Real games, out of sample
+
+| period | games | forecast − closing ML Brier (95% CI) | margin PI coverage 50/80/90/95% | total PI coverage 50/80/90/95% | median 90% width of P(win) |
+|---|---|---|---|---|---|
+| development 2015–2021 | 1,881 | −0.00018 (−0.00096 to +0.00051) | 55.7 / 83.4 / 91.4 / 95.0 | 52.1 / 81.9 / 90.5 / 95.1 | 2.4 pts |
+| holdout 2022–2026 (run once) | 1,201 | −0.00019 (−0.00073 to +0.00032) | 57.1 / 82.1 / 91.2 / 95.5 | 54.8 / 83.2 / 91.1 / 94.8 | 1.8 pts |
+
+* **Win probability:** the forecast is indistinguishable from the closing
+  moneyline, with a CI that includes 0 in both periods.
+* **Ratings-only forecasts are clearly worse.** Without market lines, the model's
+  Brier score is 0.2186 in development, against 0.2136 for the closing moneyline.
+* **80–95% intervals:** margin and total coverage is within about 1–3 points of
+  the nominal level.
+* **50% intervals over-cover** (52–57%). Scores are integers, and equal-tailed
+  intervals on integer outcomes include whole key numbers.
+* **Parameter uncertainty is negligible next to game-to-game variation.** The
+  predictive-mixture intervals are almost the same as the plug-in ones.
+* **The win-probability intervals are narrow, 1.8–2.4 points.** That is because the
+  forecast stays close to the closing market. It is not evidence that games are
+  predictable, and it does not cover model or market misspecification.

@@ -18,7 +18,8 @@ python -m unittest discover tests     # regression tests
 ```bash
 python run.py check-live              # is the live odds feed configured and usable? (writes nothing)
 python run.py collect                 # snapshot quotes + injury reports (run on a schedule)
-python run.py predict                 # report for the upcoming week; records every forecast
+python run.py predict                 # GAME FORECASTS + BETTING OPPORTUNITIES for the upcoming week; records both
+python run.py forecast                # game forecasts only, from nflverse consensus lines (no odds requests, free)
 python run.py recommend               # compact table for the next game day
 python run.py place --forecast ID --stake 1   # record a wager you actually placed
 python run.py coverage --season 2026 --weeks 5-8   # which slate games have horizon-eligible forecasts
@@ -26,6 +27,9 @@ python run.py grade --season 2026 --weeks 5-8      # forecasts, recommendations 
 python run.py verify-log              # integrity check of all hash-chained logs
 python run.py validate                # out-of-sample validation (about 6 minutes)
 python run.py compare-models          # legacy vs model vs market-only probabilities, dev seasons
+python run.py validate-forecasts      # out-of-sample check of forecasts and their intervals (dev seasons)
+python run.py simulate-intervals      # known-truth simulation of the probability intervals (~45 min)
+# predict / forecast / recommend take --uncertainty fast (default, 100 replicates, cached) | deep (1000) | off
 ```
 
 **Latest report: [reports/LATEST.md](reports/LATEST.md).** Old pick files are kept in
@@ -59,6 +63,47 @@ Every report starts with three sections:
 * **Decisions** with reasons, minimum acceptable price, sensitivity, and why the
   bet could be wrong.
 * **Assumptions** and **missing or stale information**, listed separately.
+
+## Game forecasts and their uncertainty (details: docs/UNCERTAINTY.md)
+
+Every report now has two separate parts:
+* **GAME FORECASTS.** These cover every game with enough data, whether or not there is a bet:
+  * the predicted winner, and each team's win and tie probability
+  * the projected home-minus-away margin and the projected total
+  * the basis (market-informed, or team ratings only), data times, model version and missing inputs
+* **BETTING OPPORTUNITIES.** For each market, the best side's book, line and odds, then:
+  * P(win), P(push) and P(lose)
+  * EV, with an EV range
+  * the existing decision and its reasons
+
+A team can be the predicted winner while every bet on its game is NO BET.
+
+Two kinds of interval, computed separately:
+* **Win probability ± interval.** This shows how much the *estimated* probability moves
+  when the model is refit on re-weighted history. The method is a season-blocked
+  Bayesian bootstrap of the whole fit, including calibration. Ratings and market
+  quotes are held fixed, so the interval is conditional on the market snapshot.
+  * A 90% interval is **not** a 90% chance of winning.
+  * It is narrow (about ±1 point) because the forecast stays close to the market.
+* **Margin / total prediction interval.** The range of the actual final score,
+  from the full predictive distribution (game-to-game variation and key numbers
+  such as 3 and 7). Out of sample, 90% intervals contained the actual margin in
+  91.2–91.4% of games and the actual total in 90.5–91.1%.
+
+**EV range.** Each replicate re-prices the side at the same fixed price and
+reference, using its own joint win/push probabilities.
+* The range does not change any decision.
+* An experimental rule that also requires the EV lower bound to be above 0
+  (`experimental_ev_lower_bound_rule`) is **off** by default.
+
+Validation results:
+* **Win probability:** the forecast scores the same as the closing moneyline
+  (Brier difference −0.0002; the CI includes 0 in development and in the holdout).
+
+Runtime and caching:
+* **Fast run:** 100 replicates, about 40 s on 7 cores the first time; then cached
+  per training cutoff in `data/cache/uncertainty/`.
+* **`--uncertainty deep`:** 1,000 replicates.
 
 ## Your inputs (all optional)
 
