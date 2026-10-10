@@ -294,3 +294,13 @@ above 0. The CI is reported either way.
 `logs/experiments.jsonl` (group `OL1`). No setting, default or live decision changes.
 A positive result would justify collecting timestamped early-week quotes (the live
 `early` horizon) to test the rule prospectively. It would not justify betting it.
+
+**OL1 amendment (2026-10-09, before any OL1 run; no OL1 result has been seen).** The model
+needs at least four training seasons (three for its inner walk-forward plus one), so 2014
+cannot be predicted from 2011–2013 as written above.
+* **What changes:** the first season with walk-forward rows is 2015 (fit on 2011–2014),
+  and 2015 has no earlier rows for the expected move (a, b).
+* **2015 bets are still placed and graded.** The rule uses only |g| ≥ T, so the
+  development criterion (ROI at −110, 2015–2021) is unchanged.
+* **Only the descriptive metrics lose 2015.** Expected move, predicted cover and the
+  key-number split cover 2016 onward.
