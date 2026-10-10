@@ -394,9 +394,15 @@ The legacy calibration `sigmoid(a + b·logit p + c·edge)` is kept only as a bas
     6 bets (6-0; CLV +0.58 pts, CI −0.50 to +1.67). The live calibration `c` is fit
     against CLOSING lines and is about 0, so it gives the model almost no weight
     at the open. Six bets show nothing either way.
-  * **Not yet a betting rule.** Turning this into one, for example by calibrating
-    `c` against opening lines, is a new decision rule. It would need its own
-    pre-registered experiment and a single holdout run.
+  * **Tested as a betting rule: OL1** (`python run.py open-line`, pre-registered in
+    docs/EXPERIMENTS.md). Bet the opener toward the model when the two differ by
+    T points or more.
+    * **Fails on development seasons.** At the chosen T = 4 (237 bets), ROI is
+      +4.8% at −110 (95% CI −6.9% to +16.5%) and +7.2% at −105 (−4.8% to +19.1%).
+    * **The movement is real but too small.** Realized CLV was +0.92 points
+      (+0.65 to +1.17). That predicts a 53.2% cover rate; the actual was 55.0%,
+      against 52.4% needed at −110.
+    * No holdout run; nothing changes live.
 
 **Early decision horizon** (live). Forecasts issued between `early_horizon_max_hours`
 (168) and `early_horizon_min_hours` (84) before kickoff are tagged `early`.
