@@ -170,3 +170,37 @@ logs/experiments.jsonl (group `G6-search`).
 values under the general criteria (group `G6`). Selecting the best of several
 configurations on the development seasons and then testing it on the same seasons favors
 it; the holdout is the guard: run once, only if the development criteria pass.
+
+
+### G5 / G6 results (appended 2026-10-09; protocol above unchanged)
+
+Recorded in `logs/experiments.jsonl`, development seasons 2015–2021, commit `6455057`.
+Differences are experiment minus current log loss, with paired game-bootstrap 95% CIs.
+
+| group | winner | home covers | over hits | own-line MAE (margin / total) | verdict |
+|---|---|---|---|---|---|
+| G5b (QB change at a new season, 35 pts per EPA/dropback) | +0.00015 (−0.00066, +0.00098), 3/7 | +0.00010 (−0.00052, +0.00072), 3/7 | 0.00000 (0, 0), 0/7 | 10.212 → 10.248 / 10.831 → 10.831 | fails: no CI below 0 |
+| G6 best of 13 (k_margin 0.05, a_eff 0.07, carry 0.70, qb_shrink 100, qb_decay 0.985) | −0.00048 (−0.00106, +0.00007), 5/7 | −0.00022 (−0.00067, +0.00024), 6/7 | −0.00031 (−0.00076, +0.00020), 4/7 | 10.212 → 10.183 / 10.831 → 10.840 | fails: no CI below 0 |
+
+G6 search, own-line MAE (margin) per configuration:
+
+| configuration | MAE |
+|---|---|
+| current | 10.2121 |
+| k_margin 0.05 / 0.09 | 10.1972 / 10.2336 |
+| a_eff 0.07 / 0.13 | 10.2019 / 10.2203 |
+| carry 0.50 / 0.70 | 10.2273 / 10.2067 |
+| qb_shrink 100 / 250 | 10.2114 / 10.2138 |
+| qb_decay 0.95 / 0.985 | 10.2165 / 10.2120 |
+| a_pace 0.07 / 0.13 | 10.2121 / 10.2121 (a_pace only affects totals) |
+| combined (all improving moves) | 10.1825 |
+
+* **Neither group passed, so neither was evaluated on the holdout.** Live
+  defaults are unchanged.
+* **G6's best configuration is an optimistic estimate.** It was chosen on the
+  same seasons it was scored on.
+* **The changes are small next to the gap to the market.** The best own-line
+  MAE gain is 0.03 points. In 2015–2021 the closing line's MAE is 0.15–0.36
+  points lower than the model's own line, about 0.24 on average
+  (reports/validation.md).
+* **G5a (win totals) was not run.** It needs `data/preseason_win_totals.csv`.

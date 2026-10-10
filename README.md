@@ -29,6 +29,8 @@ python run.py validate                # out-of-sample validation (about 6 minute
 python run.py compare-models          # legacy vs model vs market-only probabilities, dev seasons
 python run.py validate-forecasts      # out-of-sample check of forecasts and their intervals (dev seasons)
 python run.py simulate-intervals      # known-truth simulation of the probability intervals (~45 min)
+python run.py clv-backtest            # opening lines vs close and CLV (needs data/historical_lines.*; see below)
+python run.py experiment --group G5   # pre-registered experiments G1-G6 (docs/EXPERIMENTS.md)
 # predict / forecast / recommend take --uncertainty fast (default, 100 replicates, cached) | deep (1000) | off
 ```
 
@@ -288,18 +290,28 @@ and prices across books, marking reference-only books.
   snapshot the inputs available at the time, building horizon-matched history
   from now on.
 
-Latest run, 2015 to week 5 of 2026, 3,082 games scored identically:
+Latest run, 2015 to week 5 of 2026, 3,082 games scored identically (live
+`probability_model = model`):
 
 | target | model Brier | closing market | model − market (95% CI, game bootstrap) |
 |---|---|---|---|
-| winner | 0.21283 | 0.21271 | +0.00012 (−0.00051 to +0.00068) |
-| home covers | 0.25016 | 0.24990 | +0.00026 (−0.00064 to +0.00118) |
-| over hits | 0.25029 | 0.24996 | +0.00034 (−0.00047 to +0.00111) |
+| winner | 0.2128 | 0.2127 | +0.0001 (−0.00039 to +0.00049) |
+| home covers | 0.2500 | 0.2499 | +0.0001 (−0.00013 to +0.00030) |
+| over hits | 0.2501 | 0.2500 | +0.0001 (−0.00022 to +0.00045) |
 
 The model is **not** better than the closing market on any target, and
-season-by-season differences go both ways. The QB feature lowers the model's
-own-line error in 9 of 12 seasons; its effect on final probabilities is within
-noise. Calibration error (ECE) is 0.017 for the model vs 0.016 for the market.
+season-by-season differences go both ways.
+
+**Value of the model's edge.** The live probability is
+`sigmoid(logit p_market + c × edge)`, where edge is the model's line minus the
+market line. Its 95% CI on `c` (game bootstrap, per walk-forward season):
+* **spreads:** includes 0 in **12 of 12** seasons
+* **totals:** includes 0 in **12 of 12** seasons
+* **moneylines:** includes 0 in **11 of 12** seasons
+
+So the model's disagreement with the closing line is not distinguishable from
+no information. (Each season's model uses all earlier seasons, so these
+intervals overlap rather than being independent.)
 
 **Historical betting replay.** The replay places one side per market at the
 closing consensus price. It applies only the EV, 0.5-point robustness and gap
@@ -308,14 +320,13 @@ reference, starter availability, weather), so these are not live results.
 
 | prices | bets (games) | flat ROI | 95% CI (game-clustered) | max drawdown |
 |---|---|---|---|---|
-| recorded consensus | 1,264 (1,008) | +3.0% | −3.1% to +8.9% | 30.5u |
-| standard retail juice (4.76%) | 537 (486) | +1.4% | −7.6% to +10.7% | 27.6u |
+| recorded consensus | 76 (72) | +1.1% | −26.0% to +31.3% | 13.5u |
+| standard retail juice (4.76%) | 13 (13) | +23.7% | −41.7% to +93.2% | 3.0u |
 
-**Caution: the price source changed in 2023.** The recorded consensus prices
-carry about **2.4% overround through 2022 and about 4.7% from 2023**. All
-replay bets except one fall in 2015–2022, so the positive ROI comes from
-reduced-juice prices most bettors can't get. At standard juice it is
-indistinguishable from zero.
+With the live calibration the replay almost never bets. Every bet falls in
+2015–2021, when the recorded prices carried about **2.4% overround**; from
+2023 they carry about **4.7%** and the replay places none. Both ROI intervals
+include 0. (The previous report, 1,264 bets, predates the live calibration.)
 
 **Additional data** (`python run.py experiment --group G1..G4`, protocol and
 results in `docs/EXPERIMENTS.md`):
@@ -324,6 +335,89 @@ results in `docs/EXPERIMENTS.md`):
   unchanged baseline under a pre-registered protocol.
 * None improved out-of-sample probabilities on the 2015–2021 development
   seasons. None was evaluated on the holdout, and none is used live.
+* **G5, informed preseason prior.** At a team's first game of a new season, a
+  change of starting QB moves the team's rating. It **did not pass**:
+  * every log-loss CI includes 0
+  * own-line MAE got slightly worse, 10.212 → 10.248
+  * the preseason win-total variant (G5a) needs `data/preseason_win_totals.csv` and was not run
+* **G6, ratings hyperparameter search.** 13 configurations were tried, and all are
+  recorded. The best changed k_margin 0.05, a_eff 0.07, carry 0.70, qb_shrink 100
+  and qb_decay 0.985. It **did not pass**:
+  * own-line MAE 10.212 → 10.183
+  * log loss −0.00048 (winner), −0.00022 (home covers), −0.00031 (over), with
+    every CI including 0
+  * picking the best of 13 configurations on these same seasons favors it
+* No holdout runs for G5 or G6. Both remain available as ratings parameters,
+  0 / current by default, through `experiment --group`; neither is live.
+
+## Spreads: calibration, opening lines and closing-line value
+
+**Calibration diagnosis** (`reports/spread_calibration_diagnosis.md`, read-only).
+The legacy calibration `sigmoid(a + b·logit p + c·edge)` is kept only as a baseline:
+* **Fitted values** on the inner out-of-sample rows: b = 0.36 (95% CI −0.50 to
+  +1.19) and c ≈ 0 (−0.055 to +0.047).
+* **What drives its "edges".** On the 2026 week 5 slate, its shifts from the
+  no-vig price average 0.95 points. Of that:
+  * the market remapping (a, b) contributes up to 2.35 points
+  * the model (c × edge) contributes 0.02 points
+* **The live calibration** keeps a = 0, b = 1 and fits only c. It moves cover
+  probabilities by at most 0.12 points on that slate.
+* **Head to head:** on home covers, development seasons, the two calibrations are
+  indistinguishable (log loss difference +0.0003, 95% CI −0.0024 to +0.0028).
+
+**Opening lines and CLV** (`python run.py clv-backtest`). nflverse has closing lines only.
+* **What to supply:** a historical open/close file such as the AusSportsBetting
+  NFL spreadsheet, saved as `data/historical_lines.csv`, or as `.xlsx` with
+  `pip install openpyxl`.
+* **How it's read:**
+  * columns are inferred, or set by `data/historical_lines.mapping.json`
+  * teams are mapped per season, and decimal odds are detected
+  * the line sign is checked against nflverse
+  * unmatched rows are listed
+* **What it reports:**
+  * whether the closing line moves toward the model (the slope of close − open
+    on model − open, with a CI)
+  * the result of betting at the open when EV exceeds `min_edge`: CLV in
+    points and in no-vig probability, plus ROI at the opening price and at −110
+* **Status:** not run yet. No historical opening-line file is in `data/`.
+
+**Early decision horizon** (live). Forecasts issued between `early_horizon_max_hours`
+(168) and `early_horizon_min_hours` (84) before kickoff are tagged `early`.
+* For a Sunday game, that window runs from roughly Sunday night to Wednesday.
+* Kickoff − 60 forecasts are tagged `kickoff-60`.
+* Both are recorded, and `grade` evaluates each window separately.
+
+**CLV in `grade`.** For each selected forecast, at both horizons, and for each
+wager, `grade` reports CLV against the last valid pre-kickoff market reference.
+* That reference is rebuilt from the latest snapshot of validated quotes before
+  kickoff, using at least `min_reference_books` books.
+* It reports points and no-vig probability, with game-clustered 95% CIs.
+* It needs `collect` runs with live quotes, scheduled below.
+
+### Collecting quotes on a schedule (not installed for you)
+
+CLV and the early horizon need snapshots from the opener until kickoff. Each
+`collect` with a live key costs about 3 credits per region per run.
+
+A practical schedule:
+* every 4 hours from Sunday 20:00 ET through Saturday
+* hourly on game days from 08:00 ET
+* one run about 90 minutes before each kickoff window
+
+Windows (Task Scheduler), from the repo folder:
+
+```powershell
+schtasks /Create /TN "nfl-collect" /SC HOURLY /MO 4 /ST 00:00 `
+  /TR "cmd /c cd /d \"C:\path\to\nfl-betting-model\" && python run.py collect >> logs\collect_task.log 2>&1"
+schtasks /Query /TN "nfl-collect"     # check;  schtasks /Delete /TN "nfl-collect" /F  to remove
+```
+
+macOS / Linux (cron, `crontab -e`):
+
+```
+0 */4 * * *  cd /path/to/nfl-betting-model && python run.py collect >> logs/collect_task.log 2>&1
+0 8-23 * * 0  cd /path/to/nfl-betting-model && python run.py collect >> logs/collect_task.log 2>&1
+```
 
 ## Coverage of an explicit slate
 
