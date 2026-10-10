@@ -379,7 +379,24 @@ The legacy calibration `sigmoid(a + b·logit p + c·edge)` is kept only as a bas
     on model − open, with a CI)
   * the result of betting at the open when EV exceeds `min_edge`: CLV in
     points and in no-vig probability, plus ROI at the opening price and at −110
-* **Status:** not run yet. No historical opening-line file is in `data/`.
+* **Result, development seasons 2015–2021** (AusSportsBetting file; 1,889 games,
+  all matched; `reports/clv_backtest.md`):
+  * **The close moves toward the model.** Regressing close − open on own line − open
+    gives a slope of **0.17 (95% CI 0.14 to 0.21)**, so about a sixth of the model's
+    disagreement with the opener is gone by kickoff.
+  * **It survives removing QB hindsight.** The backtest uses the actual starter, which
+    may not be known at the open. On games where both teams started their usual QB
+    (622), the slope is still 0.15 (0.09 to 0.21).
+  * **Large disagreements move most.** When the model and the opener differed by 3+
+    points (118 of those games), the line moved 0.61 points toward the model on
+    average: toward it 51% of the time, away 26%.
+  * **The live rule bets almost never.** "Bet at the open when EV > 2%" placed only
+    6 bets (6-0; CLV +0.58 pts, CI −0.50 to +1.67). The live calibration `c` is fit
+    against CLOSING lines and is about 0, so it gives the model almost no weight
+    at the open. Six bets show nothing either way.
+  * **Not yet a betting rule.** Turning this into one, for example by calibrating
+    `c` against opening lines, is a new decision rule. It would need its own
+    pre-registered experiment and a single holdout run.
 
 **Early decision horizon** (live). Forecasts issued between `early_horizon_max_hours`
 (168) and `early_horizon_min_hours` (84) before kickoff are tagged `early`.

@@ -91,6 +91,25 @@ class Load(unittest.TestCase):
         self.assertEqual(sw["open_line"], 2.5)
         self.assertEqual(sw["home_line_odds_open"], hl.decimal_to_american(1.92))   # odds swapped with the teams
 
+    def test_schedule_with_current_franchise_codes(self):
+        """The model's schedule normalizes OAK -> LV etc.; matching must still work."""
+        sched = SCHED.assign(home_team=SCHED["home_team"].replace({"OAK": "LV"}),
+                             away_team=SCHED["away_team"].replace({"OAK": "LV"}))
+        lines, rep = hl.load(FX / "historical_lines_sample.csv", sched)
+        self.assertEqual(rep["matched"], 27)
+        self.assertEqual(set(lines["game_id"]), set(LINES["game_id"]))
+
+    def test_zero_odds_are_missing_not_a_format(self):
+        raw = pd.read_csv(FX / "historical_lines_sample.csv", skiprows=1)
+        raw.loc[0, "Home Line Odds Open"] = 0
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "historical_lines.csv"
+            raw.to_csv(p, index=False)
+            lines, rep = hl.load(p, SCHED)
+        self.assertEqual(rep["odds_format"], "decimal")
+        self.assertEqual(rep["zero_odds_treated_as_missing"], 1)
+        self.assertEqual(int(lines["home_line_odds_open"].isna().sum()), 2)   # the 2020 row + the zero
+
     def test_missing_file_is_a_clear_error(self):
         old = hl.CANDIDATES
         hl.CANDIDATES = [Path(tempfile.gettempdir()) / "no_such_historical_lines.csv"]

@@ -70,6 +70,7 @@ NAMES = {
 }
 # relocated franchises: name -> [(last season with old code, old code), new code]
 MOVED = {"raiders": ("OAK", 2019, "LV"), "chargers": ("SD", 2016, "LAC"), "rams": ("STL", 2015, "LA")}
+FRANCHISE = {"OAK": "LV", "SD": "LAC", "STL": "LA"}   # same franchise, older code -> current code
 CODES = {"ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE", "DAL", "DEN", "DET", "GB", "HOU", "IND", "JAX",
          "KC", "LA", "LAC", "LV", "MIA", "MIN", "NE", "NO", "NYG", "NYJ", "OAK", "PHI", "PIT", "SD", "SEA", "SF",
          "STL", "TB", "TEN", "WAS"}
@@ -199,12 +200,14 @@ def load(path: Path | None = None, games: pd.DataFrame | None = None, mapping: d
     g = games[["game_id", "season", "gameday", "home_team", "away_team", "spread_line"]].copy()
     g["gameday"] = pd.to_datetime(g["gameday"])
     matched, unmatched = [], []
+    # match on franchise: schedules may use the code of the era (OAK) or today's (LV) for old games
+    fr = lambda c: FRANCHISE.get(c, c)  # noqa: E731
     by_teams: dict = {}
     for r in g.itertuples(index=False):
-        by_teams.setdefault((r.home_team, r.away_team), []).append(r)
+        by_teams.setdefault((fr(r.home_team), fr(r.away_team)), []).append(r)
     for i, r in df.iterrows():
         hit, swapped = None, False
-        for key, sw in (((r["home"], r["away"]), False), ((r["away"], r["home"]), True)):
+        for key, sw in (((fr(r["home"]), fr(r["away"])), False), ((fr(r["away"]), fr(r["home"])), True)):
             cands = [x for x in by_teams.get(key, []) if abs((x.gameday - r["date"]).days) <= 1]
             if len(cands) == 1:
                 hit, swapped = cands[0], sw
@@ -243,6 +246,9 @@ def load(path: Path | None = None, games: pd.DataFrame | None = None, mapping: d
         if c not in lines:
             lines[c] = np.nan
     odds_cols = ["home_line_odds_open", "away_line_odds_open", "home_line_odds_close", "away_line_odds_close"]
+    # some exports write 0 for a missing price (no real price is 0 in either format)
+    zero_odds = int((lines[odds_cols] == 0).sum().sum())
+    lines[odds_cols] = lines[odds_cols].mask(lines[odds_cols] == 0)
     odds_fmt = odds_format(lines[odds_cols].to_numpy(float).ravel())
     if odds_fmt == "decimal":
         for c in odds_cols:
@@ -254,7 +260,8 @@ def load(path: Path | None = None, games: pd.DataFrame | None = None, mapping: d
     report = {"file": str(path.name), "rows": int(len(df)), "matched": int(len(out)), "unmatched": unmatched,
               "mapping": cols, "sign_convention": conv,
               "median |close - nflverse close|": float(gap.median()) if gap.notna().any() else None,
-              "swapped": int(out["swapped"].sum()), "odds_format": odds_fmt}
+              "swapped": int(out["swapped"].sum()), "odds_format": odds_fmt,
+              "zero_odds_treated_as_missing": zero_odds}
     return out, report
 
 
