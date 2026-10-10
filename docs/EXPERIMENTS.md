@@ -304,3 +304,34 @@ cannot be predicted from 2011–2013 as written above.
   development criterion (ROI at −110, 2015–2021) is unchanged.
 * **Only the descriptive metrics lose 2015.** Expected move, predicted cover and the
   key-number split cover 2016 onward.
+
+### OL1 results (appended 2026-10-09; protocol and amendment above unchanged)
+
+Recorded in `logs/experiments.jsonl` (group `OL1`); report `reports/open_line_experiment_dev.md`.
+Development seasons 2015–2021, model `c9f56b5`, 1,889 games with an opening line.
+
+| T | bets | cover (95% CI) | predicted cover | ROI at −110 (95% CI) | ROI at −105 (95% CI) | realized CLV, pts (95% CI) |
+|---|---|---|---|---|---|---|
+| 2 | 786 | 52.3% (48.6–55.8) | 52.2% | −0.2% (−6.7 to +6.2) | +2.0% (−4.6 to +8.6) | +0.54 (+0.41 to +0.68) |
+| 3 | 439 | 54.3% (49.4–59.0) | 52.7% | +3.6% (−5.3 to +12.3) | +5.9% (−3.2 to +14.8) | +0.77 (+0.58 to +0.95) |
+| **4 (chosen)** | 237 | 55.0% (48.5–61.5) | 53.2% | **+4.8% (−6.9 to +16.5)** | +7.2% (−4.8 to +19.1) | +0.92 (+0.65 to +1.17) |
+
+**Verdict: fails the development criterion** (the ROI CI at −110 includes 0), so there
+is no holdout run, and nothing changes.
+
+* **The line movement is real, and the expected move predicts it.** At T = 4 the
+  expected move was 0.93 points and the realized CLV was 0.92.
+* **The cover rates match their predictions.** Turning that CLV into a cover
+  probability with the key-number distribution gives 53.2%; the actual rate was
+  55.0%. Both are just above the 52.4% break-even at −110.
+* **Too small to tell from zero.** An edge of about one point from the open is worth
+  roughly 1–3 points of ROI. With about 34 bets a season, that cannot be separated
+  from 0. It also gets eaten by any juice above −110 or any delay in getting the
+  opening number.
+* **Key numbers:** only 17 bets crossed 3 or 7 (52.9%, predicted 56.7%), too few to
+  read.
+* **Eras:** Pinnacle 2015–2017: 58.5% (96 bets). bet365 2018–2021: 52.6% (141 bets).
+* **Usual QBs on both sides:** 61.2% (50 bets). All of these splits are descriptive.
+* **The timing of "open" in the file is unknown** (flag above). A live test would need
+  timestamped quotes in the early window, which `collect` and the early horizon now
+  record.
