@@ -204,3 +204,93 @@ G6 search, own-line MAE (margin) per configuration:
   points lower than the model's own line, about 0.24 on average
   (reports/validation.md).
 * **G5a (win totals) was not run.** It needs `data/preseason_win_totals.csv`.
+
+
+## OL1: bet the opening spread toward the model (protocol written 2026-10-09, before any OL1 run)
+
+**Why.** The opening-line backtest found that the closing line moves toward the model's
+ratings-only line. OL1 tests whether betting the opener in that direction is profitable
+after juice. It is a historical test only. **Nothing changes live predictions or
+decisions, whatever the result.**
+
+**Disclosure: development results seen before writing this protocol.**
+* The slope of (close − open) on (own line − open): 0.17 (95% CI 0.14 to 0.21). For
+  the blend at the open line: 0.18 (0.12 to 0.24).
+* The same slope on games where both teams started their usual QB: 0.15 (0.09 to 0.21).
+* For those usual-QB games with |own line − open| ≥ 3 (118 games): an average move of
+  +0.61 points toward the model. The line moved toward the model in 51% of them and
+  away in 26%.
+* The live rule (bet the open when EV > 2%) placed 6 bets and went 6–0.
+* **Not seen:** the cover rate, ROI or CLV of any threshold rule, and anything from
+  2022 onward.
+
+**Data.**
+* The AusSportsBetting spreadsheet, loaded by `nflmodel/histlines.py`. Every row
+  matches a schedule game.
+* Each era's lines come from **one bookmaker**: Pinnacle from 2014 to Feb 2018,
+  bet365 from Sep 2018 to Feb 2025, and betr from Sep 2025.
+* **When the "open" was recorded is not documented,** and the file has no timestamps.
+  So it cannot be confirmed to fall inside the live early window (168–84 h before
+  kickoff). If it was posted earlier (look-ahead lines), the model would hold more
+  information than the opener did, which would flatter OL1. This mismatch is flagged
+  in every report.
+* Excluded: games without an opening line, and games marked "Data supply issue this
+  week".
+
+**Signal.** g = own line − open (points; positive = the model rates the home team
+better).
+* The own line is the ratings-only margin from the walk-forward model for that
+  season, fit on earlier seasons only.
+* The QB in the ratings is the actual starter, which may not have been known at the
+  open. Results on games where both teams started their usual QB are reported as a
+  check.
+
+**Rule.** If |g| ≥ T, bet the side the model favors at the opening line: home when
+g > 0, away otherwise. At most one bet per game.
+* T is one of **2, 3 or 4 points**.
+* **T is chosen on the development seasons (2015–2021) only:** the highest flat ROI at
+  −110 among thresholds with at least 100 bets. A tie goes to the larger T.
+* Choosing the best of three on the same seasons flatters the chosen T. The holdout
+  is the guard.
+
+**Scoring** (one bet per game, so the bootstrap resamples bets/games, 2000 resamples):
+* **Prices:** flat 1u at **−110** (the main price; break-even 52.4%) and at **−105**
+  (break-even 51.2%), each with a 95% CI. ROI at the file's own opening price is
+  reported but is not a criterion.
+* **Cover rate:** wins / (wins + losses), with a 95% CI, plus the number of pushes.
+* **Realized CLV:** close − open in the bet's direction (points), with a CI.
+
+**Expected move and predicted cover rate.**
+* **Expected move:** a + β·g. The slope β is fit by OLS of (close − open) on g over
+  the **earlier** seasons' games only, an expanding window starting with 2014.
+  2014 is predicted by a model fit on 2011–2013, the minimum three seasons that
+  `validate` uses.
+* **Expected close** = open + expected move.
+* **Predicted cover probability:** the season's key-number margin distribution
+  (`model.margin_dist`) is centered so that P(margin > expected close | no push) = 0.5.
+  That is, the expected close is treated as fair. The predicted P(cover | no push)
+  and P(push) for the bet at the open line follow from it.
+* **Reported:** mean predicted vs actual cover rate (with a CI), overall and in each
+  subgroup below.
+
+**Key-number subgroups.** A bet's expected move crosses a key number if a value k in
+{−7, −3, 3, 7} satisfies open < k ≤ expected close, or expected close ≤ k < open. All
+metrics are reported separately for crossing and not-crossing bets. The split is
+descriptive, not a criterion.
+
+**Also reported (not criteria):**
+* by season
+* by source era: Pinnacle 2015–2017, bet365 2018–2021
+* the usual-QB subset
+
+**Development pass.** At the chosen T, the 95% CI of the flat ROI at −110 is entirely
+above 0.
+
+**Holdout** (2022 to the latest completed game, run **once** and only after a
+development pass): the holdout **confirms** if the flat ROI at −110, at the same T, is
+above 0. The CI is reported either way.
+
+**Either way:** OL1 is reported in `reports/open_line_experiment_*.md` and
+`logs/experiments.jsonl` (group `OL1`). No setting, default or live decision changes.
+A positive result would justify collecting timestamped early-week quotes (the live
+`early` horizon) to test the rule prospectively. It would not justify betting it.
