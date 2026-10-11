@@ -7,3 +7,4 @@ templates/
 reports/dev/
 logs/graded.csv
 .env
+logs/collect_task.log
