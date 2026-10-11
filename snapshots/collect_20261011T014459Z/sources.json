@@ -1,0 +1,24 @@
+{
+  "schedule_scores_lines": {
+    "url": "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv",
+    "retrieved_utc": "2026-10-11T01:44:58Z",
+    "last_modified": null,
+    "latest_result_in_data": "2026-10-08"
+  },
+  "odds_api": {
+    "url": "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds?apiKey=***",
+    "retrieved_utc": "2026-10-11T01:44:59Z",
+    "last_modified": null,
+    "quota": {
+      "x-requests-used": "21",
+      "x-requests-remaining": "479",
+      "x-requests-last": "3"
+    }
+  },
+  "injury_reports": {
+    "url": "https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_2026.parquet",
+    "retrieved_utc": "2026-10-11T01:44:59Z",
+    "last_modified": "Sat, 10 Oct 2026 13:33:06 GMT",
+    "latest_week_in_data": 5
+  }
+}

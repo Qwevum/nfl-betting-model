@@ -1,0 +1,14 @@
+{
+  "consensus.csv": "084c470ecd1b2982a13c3a9149cb3c29db337f2855fbedbf0f67d148c2529316",
+  "injuries.parquet": "3a742d408ed180ce5f209c05cd4fed3e0532c048b52642ff569a0d76aba001f1",
+  "inputs_rejected.csv": "f9e969ffa45742bd7e261131a3c8f5007caf3e0e5862e910b3d89558bee7aa12",
+  "meta.json": "19fa2c4e47667bad2260630d337331cb011ad18cd743c39e141f1abb9a02d943",
+  "odds_manual.csv": "74e0e2409ac9b6698e83ca982b2b2ec22c929ea10ff81c63ae34c97df8904a3d",
+  "offers_raw.csv": "b0de29b554b21939875593cdc66e74debf89a5325699a3c39e45f179c9945c16",
+  "offers_rejected.csv": "5e2fa7b7484fbf3debbf543a9d72cc83ff648058af2c87d3b11abb889717024f",
+  "offers_valid.csv": "a4c38922198aa4d1b58a341a8feae7f7c1c810bb3d6b42d9b6f522035ad24905",
+  "schedule_rows.csv": "ee4d45f0c663b9624ae93a13eec75db0a54b880abe48d2fd0aca993c95b84d39",
+  "sources.json": "be626623c810a1950cbc3a7eca81b4faac5a069d8c7ac07c844e3d5445209b66",
+  "weather_accepted.csv": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+  "weather_manual.csv": "40d1913eeb0ea864fbae55d85a66f46e75dd923de1dbc4c06f12fc8eabfe8937"
+}

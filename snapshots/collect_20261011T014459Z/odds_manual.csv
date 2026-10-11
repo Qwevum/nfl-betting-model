@@ -1,0 +1,6 @@
+# Quotes copied from your sportsbook apps. Get game_id/kickoff_utc rows from `python run.py templates`.
+# market: spread | ml | total     side: home | away | over | under
+# point: spread from that side's view (e.g. -3.5), the total for totals, blank for ml
+# odds_time_utc: when you saw the price, ISO-8601 UTC, e.g. 2026-10-11T15:05:00Z (required;
+#   quotes older than max_odds_age_minutes, or at/after kickoff, are rejected)
+game_id,kickoff_utc,book,market,side,point,price,odds_time_utc

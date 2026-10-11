@@ -1,0 +1,38 @@
+{
+  "injuries_retrieved_utc": "2026-10-11T01:45:01Z",
+  "inputs_read_utc": "2026-10-11T01:45:01Z",
+  "notes": [
+    "The Odds API (us): 792 offers from 9 books",
+    "The Odds API credits: used 21, remaining 479, last 3"
+  ],
+  "odds_collected_utc": "2026-10-11T01:44:59Z",
+  "run_started_utc": "2026-10-11T01:44:58Z",
+  "settings": {
+    "actionable_books": "",
+    "clock_skew_minutes": 2.0,
+    "early_horizon_max_hours": 168.0,
+    "early_horizon_min_hours": 84.0,
+    "experimental_ev_lower_bound_rule": false,
+    "gap_points": 4.0,
+    "horizon_minutes": 60.0,
+    "horizon_tolerance_minutes": 15.0,
+    "kelly_fraction": 0.25,
+    "kickoff_match_minutes": 10.0,
+    "max_odds_age_minutes": 30.0,
+    "max_stake_units": 2.0,
+    "min_edge": 0.02,
+    "min_reference_books": 2,
+    "odds_api_regions": "us",
+    "probability_model": "model",
+    "qb_confirm_max_age_minutes": 2880,
+    "uncertainty_deep_replicates": 1000,
+    "uncertainty_level": 0.9,
+    "uncertainty_replicates": 100,
+    "uncertainty_scheme": "season",
+    "uncertainty_seed": 20261009,
+    "uncertainty_workers": 0,
+    "watchlist_size": 10,
+    "weather_max_age_minutes": 720,
+    "weather_valid_window_minutes": 180
+  }
+}
