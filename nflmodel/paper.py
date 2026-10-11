@@ -78,14 +78,14 @@ def candidates(preds: pd.DataFrame, valid: pd.DataFrame, now: pd.Timestamp, sett
     return pd.DataFrame(out), notes
 
 
-def record(cands: pd.DataFrame, run: dict, path: Path = STORE) -> list[dict]:
+def record(cands: pd.DataFrame, run: dict, path: Path | None = None) -> list[dict]:
     if cands.empty:
         return []
-    return store.append(path, KIND, [{**r, **run} for r in cands.to_dict("records")])
+    return store.append(path or STORE, KIND, [{**r, **run} for r in cands.to_dict("records")])
 
 
-def frame(path: Path = STORE) -> pd.DataFrame:
-    recs = [r for r in store.read(path) if r.get("kind") == KIND]
+def frame(path: Path | None = None) -> pd.DataFrame:
+    recs = [r for r in store.read(path or STORE) if r.get("kind") == KIND]
     if not recs:
         return pd.DataFrame()
     return pd.DataFrame([{**r["data"], "recorded_utc": r["recorded_utc"], "hash": r["hash"]} for r in recs])

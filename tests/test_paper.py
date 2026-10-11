@@ -87,6 +87,18 @@ class Grading(unittest.TestCase):
         self.assertEqual(g.iloc[0]["result"], "W")         # won by 4, laid 3
         self.assertAlmostEqual(g.iloc[0]["profit"], 100 / 110)
 
+    def test_store_path_resolved_at_call_time(self):
+        """Redirecting paper.STORE (as tests and smoke runs do) must never write the real log."""
+        old = paper.STORE
+        with tempfile.TemporaryDirectory() as d:
+            paper.STORE = Path(d) / "p.jsonl"
+            try:
+                paper.record(pd.DataFrame([{"game_id": "G"}]), {"run_id": "t"})
+                self.assertTrue(paper.STORE.exists())
+                self.assertEqual(len(paper.frame()), 1)
+            finally:
+                paper.STORE = old
+
     def test_decision_rule(self):
         self.assertTrue(paper.decision(49, 0.01, 0.05).startswith("collecting"))
         self.assertIn("-105 or better", paper.decision(50, 0.001, 0.03))

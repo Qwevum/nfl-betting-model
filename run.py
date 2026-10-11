@@ -747,7 +747,7 @@ def _ol1_paper(window, valid, now, settings, args, run_id: str, sid: str) -> Non
     recs = paper.record(cands, {"run_id": run_id, "snapshot_id": sid, "model_version": version,
                                 "issued_utc": fmt(now), "horizon_tag": "early", "gap_threshold": paper.GAP})
     print(f"OL1-paper: {len(early)} game(s) in the early window, {len(recs)} recorded to "
-          f"{paper.STORE.relative_to(ROOT)} (|own line - reference| >= {paper.GAP:g})")
+          f"{paper.STORE.name} (|own line - reference| >= {paper.GAP:g})")
 
 
 def cmd_experiment(args):
