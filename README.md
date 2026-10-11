@@ -419,18 +419,31 @@ wager, `grade` reports CLV against the last valid pre-kickoff market reference.
 
 ### Collecting quotes on a schedule (not installed for you)
 
-CLV and the early horizon need snapshots from the opener until kickoff. Each
-`collect` with a live key costs about 3 credits per region per run.
+CLV, the early horizon and OL1-paper all need snapshots from Sunday night until kickoff.
+* **Cost:** every `collect` makes one Odds API request for all upcoming games, costing
+  3 credits with region `us`.
+* **Check your plan:** `python run.py quota` shows the credits used and remaining. It
+  calls the free `/sports` endpoint, so it spends 0 credits. It also shows the monthly
+  usage of each schedule.
 
-A practical schedule:
-* every 4 hours from Sunday 20:00 ET through Saturday
-* hourly on game days from 08:00 ET
-* one run about 90 minutes before each kickoff window
+On the **500-credit plan** (in season, about 4.3 weeks a month):
+
+| schedule | credits / month | fits 500? |
+|---|---|---|
+| every 4 h | ~546 | no |
+| every 6 h | ~364 | yes, leaving ~136 (about 45 `predict` / `check-live` requests) |
+| every 6 h + hourly on game days | ~754 | no |
+| every 8 h | ~273 | yes |
+
+**Recommended:** every 6 hours (00:00, 06:00, 12:00, 18:00 local). One request covers
+every game in the next 7 days, so this captures:
+* each game's early window (84–168 h before kickoff) four times a day
+* the last pre-kickoff reference within 6 hours of kickoff
 
 Windows (Task Scheduler), from the repo folder:
 
 ```powershell
-schtasks /Create /TN "nfl-collect" /SC HOURLY /MO 4 /ST 00:00 `
+schtasks /Create /TN "nfl-collect" /SC HOURLY /MO 6 /ST 00:00 `
   /TR "cmd /c cd /d \"C:\path\to\nfl-betting-model\" && python run.py collect >> logs\collect_task.log 2>&1"
 schtasks /Query /TN "nfl-collect"     # check;  schtasks /Delete /TN "nfl-collect" /F  to remove
 ```
@@ -438,9 +451,24 @@ schtasks /Query /TN "nfl-collect"     # check;  schtasks /Delete /TN "nfl-collec
 macOS / Linux (cron, `crontab -e`):
 
 ```
-0 */4 * * *  cd /path/to/nfl-betting-model && python run.py collect >> logs/collect_task.log 2>&1
-0 8-23 * * 0  cd /path/to/nfl-betting-model && python run.py collect >> logs/collect_task.log 2>&1
+0 */6 * * *  cd /path/to/nfl-betting-model && python run.py collect >> logs/collect_task.log 2>&1
 ```
+
+### OL1-paper (prospective, no stakes)
+
+When a `collect` run finds a game 84–168 h before kickoff where the ratings-only own
+line differs from the multi-book reference by **4 or more points**, it records an
+`OL1-paper` forecast in `logs/paper_forecasts.jsonl`. Each record has the real quote
+timestamps and the best price across books.
+* **Independent of live decisions:** it never changes a BET / NO BET, and the live
+  rules, including `gap_points`, never suppress it.
+* **Graded in `grade`, section 5:** only the earliest forecast per game counts, scored
+  on CLV against the last valid pre-kickoff reference (no-vig probability and points),
+  with a running 95% CI.
+* **Decision rule** (pre-registered in docs/EXPERIMENTS.md), with formal looks at 50 and
+  100 graded forecasts:
+  * CI above 0 at a look: small real stakes may be considered, only at −105 or better
+  * CI including 0 at 100: retire OL1
 
 ## Coverage of an explicit slate
 
