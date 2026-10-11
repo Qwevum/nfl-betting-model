@@ -715,6 +715,39 @@ def cmd_collect(args):
     print(f"Weather: {len(weather)} valid forecast(s), {n_wx} newly archived, {len(rej_wx)} rejected")
     print(f"Collected {len(window)} games, {len(valid)} valid / {len(rejected)} rejected quotes, "
           f"{len(inj)} injury rows -> {d.relative_to(ROOT)}")
+    _ol1_paper(window, valid, collected, settings, args, run_id, sid)
+
+
+def _ol1_paper(window, valid, now, settings, args, run_id: str, sid: str) -> None:
+    """OL1-paper (docs/EXPERIMENTS.md): record |own line - multi-book reference| >= 4 in the early window.
+    Separate from live decisions; recorded only from committed code with live quotes."""
+    from nflmodel import paper
+    lead = (window["kickoff_utc"] - now).dt.total_seconds() / 3600
+    early = window[(lead >= settings.early_horizon_min_hours) & (lead <= settings.early_horizon_max_hours)]
+    if early.empty:
+        print("OL1-paper: no game in the early window (84-168 h before kickoff) this run")
+        return
+    if valid.empty:
+        print(f"OL1-paper: {len(early)} game(s) in the early window, but no validated bookmaker quotes "
+              "(live feed not configured or no books); nothing recorded")
+        return
+    version = track.model_version()
+    if version.endswith("-modified") or version == "unknown":
+        print("OL1-paper: not recorded (uncommitted model code)")
+        return
+    _, feat, _, _, _ = build(refresh=False)    # collect already refreshed the schedule and results
+    train = feat[feat["result"].notna() & (feat["gameday"] < early["gameday"].min())
+                 & (feat["season"] > FIRST_PBP_SEASON)]
+    model = fit(train)
+    rows = feat[feat["game_id"].isin(early["game_id"])].drop(columns=["kickoff_utc"], errors="ignore").merge(
+        early[["game_id", "kickoff_utc"]], on="game_id")
+    cands, notes = paper.candidates(model.predict(rows), valid, now, settings)
+    for n in notes:
+        print(f"  OL1-paper: {n}")
+    recs = paper.record(cands, {"run_id": run_id, "snapshot_id": sid, "model_version": version,
+                                "issued_utc": fmt(now), "horizon_tag": "early", "gap_threshold": paper.GAP})
+    print(f"OL1-paper: {len(early)} game(s) in the early window, {len(recs)} recorded to "
+          f"{paper.STORE.relative_to(ROOT)} (|own line - reference| >= {paper.GAP:g})")
 
 
 def cmd_experiment(args):
@@ -998,6 +1031,16 @@ def cmd_open_line(args):
     print(f"\nReport {out.relative_to(ROOT)}; recorded in logs/experiments.jsonl")
 
 
+def cmd_quota(args):
+    """Odds API credits (from the free /sports endpoint, which costs no credits) and the monthly
+    usage of a collect schedule. Writes nothing and installs nothing."""
+    from nflmodel import apikey, quota
+    settings = load_settings()
+    per_run = 3 * len(settings.odds_api_regions.split(","))
+    status = quota.remaining(apikey.get()) if apikey.get() else None
+    print(quota.report(status, per_run, args.every_hours, args.gameday_hourly))
+
+
 def cmd_check_live(args):
     """Diagnose the live bookmaker feed. Prints statistics only; writes nothing."""
     from nflmodel import apikey, livecheck
@@ -1115,6 +1158,22 @@ def cmd_grade(args):
         print("   " + closing.summary(c).round(4).to_string(index=False).replace("\n", "\n   "))
     if refs.empty:
         print("   no snapshot has two-sided quotes from enough books before kickoff yet: run `collect` on a schedule")
+    from nflmodel import paper
+    pf = paper.frame()
+    print("\n5) OL1-PAPER (prospective, no stakes; earliest forecast per game; docs/EXPERIMENTS.md OL1-paper)")
+    if pf.empty:
+        print("   no OL1-paper forecasts recorded yet")
+    else:
+        pg = paper.graded(pf, refs, games)
+        g["ol1_paper"] = pg
+        s = paper.summary(pg)
+        print(f"   {s['recorded_games']} game(s) with a forecast; {s['graded_with_clv']} graded on CLV")
+        if s["graded_with_clv"]:
+            print(f"   mean CLV, no-vig probability {s['mean_clv_prob']:+.4f} (95% CI {s['clv_prob_lo']:+.4f} to "
+                  f"{s['clv_prob_hi']:+.4f}); points {s['mean_clv_points']:+.2f} ({s['clv_points_lo']:+.2f} to "
+                  f"{s['clv_points_hi']:+.2f})")
+            print(f"   settled {s['settled']}: {s['record']}, ROI at the recorded price {s['roi_at_recorded_price']:+.1%}")
+        print(f"   status: {s['decision']}")
     for name, df in g.items():
         df.to_csv(ROOT / "logs" / f"graded_{name}.csv", index=False)
 
@@ -1153,8 +1212,9 @@ def cmd_void(args):
 def cmd_verify_log(args):
     bad = False
     from nflmodel import experiment
+    from nflmodel import paper
     for path in (store.FORECASTS, store.GAME_FORECASTS, store.LEDGER, store.COLLECTIONS, experiment.LOG,
-                 store.WEATHER_ARCHIVE):
+                 store.WEATHER_ARCHIVE, paper.STORE):
         ok, msg = store.verify(path)
         bad |= not ok
         print(f"{path.relative_to(ROOT)}: {'OK' if ok else 'FAILED'} - {msg}")
@@ -1218,6 +1278,9 @@ def main():
     vf.add_argument("--holdout", action="store_true", help="the one-time holdout evaluation (2022+)")
     vf.add_argument("--replicates", type=int, help="bootstrap replicates (default: uncertainty_replicates)")
     vf.add_argument("--workers", type=int, default=0, help="parallel processes (default: automatic)")
+    qp = sub.add_parser("quota", help="Odds API credits left (no credits spent) and a collect schedule's monthly usage")
+    qp.add_argument("--every-hours", type=float, default=4.0, help="collect interval, Sunday night to kickoff")
+    qp.add_argument("--gameday-hourly", action="store_true", help="plus hourly runs on game days 08:00-20:00 ET")
     olp = sub.add_parser("open-line", help="OL1: bet the opening spread toward the model (historical experiment)")
     olp.add_argument("--holdout", action="store_true", help="the one-time holdout run (only after a dev pass)")
     cb = sub.add_parser("clv-backtest", help="opening-line / closing-line-value backtest (needs data/historical_lines.*)")
@@ -1243,7 +1306,7 @@ def main():
      "compare-models": cmd_compare_models,
      "coverage": cmd_coverage, "simulate-intervals": cmd_simulate_intervals,
      "validate-forecasts": cmd_validate_forecasts, "clv-backtest": cmd_clv_backtest,
-     "open-line": cmd_open_line}[args.cmd](args)
+     "open-line": cmd_open_line, "quota": cmd_quota}[args.cmd](args)
 
 
 if __name__ == "__main__":
