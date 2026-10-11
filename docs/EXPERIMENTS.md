@@ -335,3 +335,60 @@ is no holdout run, and nothing changes.
 * **The timing of "open" in the file is unknown** (flag above). A live test would need
   timestamped quotes in the early window, which `collect` and the early horizon now
   record.
+
+## OL1-paper: prospective paper tracking of OL1 (protocol written 2026-10-10, before any paper forecast)
+
+**What it is.** Each OL1 signal is recorded at real early-week quotes and graded later on
+closing-line value. **No stakes.** OL1-paper forecasts are a separate record type, in
+`logs/paper_forecasts.jsonl` with kind `OL1-paper`. They never change a live BET / NO BET
+decision. Conversely, the live rules, including the `gap_points` NO BET rule, do not
+suppress them.
+
+**When a forecast is made.** At every `collect` run, for every game whose kickoff is
+84–168 hours away (the live early window, `early_horizon_*`):
+* **Reference:** the multi-book spread reference from that run's validated quotes:
+  the median line of at least `min_reference_books` books, and the no-vig P(home
+  covers) at that line, with the newest quote's real timestamp.
+* **Model:** the ratings-only own line, from the live model fit on every completed
+  game before the run, with projected starters.
+* **Signal:** g = own line − reference line. If |g| ≥ 4.0, an OL1-paper forecast is
+  recorded for the side the model favors. The 4.0 is the T chosen in OL1 and is fixed.
+* **What each record holds:**
+  * the reference line, its probability, its books and timestamps
+  * the best price available across books for that side: the best line, then the
+    best price at that line, with the book and the quote's own timestamp
+  * the no-vig probability of the side at the bet line
+  * the own line, g and the lead time
+  * the model version, run id and snapshot id
+
+**Which forecast counts.** For each game, only the EARLIEST qualifying OL1-paper
+forecast is graded. It's the closest to the opener the schedule captured. Later
+records for the same game are kept, but are never graded, so the best-looking
+snapshot cannot be picked afterwards.
+
+**Grading** (`python run.py grade`, section 5):
+* **CLV** against the last valid pre-kickoff multi-book reference in the snapshots
+  (`closing.py`).
+* **Primary metric:** mean CLV in no-vig probability (the closing no-vig probability of
+  the side at the line bet, minus the no-vig probability when it was recorded). CLV in
+  points is also reported.
+* **CI:** a 95% bootstrap CI over games, recomputed after every graded forecast (the
+  running CI).
+* **Also reported, descriptively:** W/L/P and ROI at the recorded best price.
+
+**Decision rule** (decisions are yours; nothing here places or sizes a bet).
+Formal looks at **n = 50** and **n = 100** graded forecasts only. The running CI between
+looks is for information and does not trigger a decision.
+
+| at | 95% CI of mean CLV (no-vig probability) | decision |
+|---|---|---|
+| n = 50 | entirely above 0 | small real stakes may be considered, **only at −105 or better**, logged in the ledger; paper tracking continues |
+| n = 50 | includes 0 | continue to n = 100 |
+| n = 100 | includes 0 | **retire OL1** |
+| n = 100 | entirely above 0 (and not already eligible) | small stakes may be considered, on the same terms |
+| either look | entirely below 0 | retire OL1 (added for completeness: a significantly negative CLV) |
+
+A CI above 0 shows that the rule beats the closing line on average. It does not show
+that it beats the juice: OL1's development backtest put the expected margin over −110
+at about one point of cover rate. That is why any real stake is limited to −105 or
+better.
